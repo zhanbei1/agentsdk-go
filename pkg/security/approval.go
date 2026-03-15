@@ -135,6 +135,15 @@ func (q *ApprovalQueue) Request(sessionID, command string, paths []string) (*App
 	// 2. Check records for existing session_id + command combination
 	for id, rec := range q.records {
 		if rec.SessionID == sessionID && rec.Command == command {
+			// Auto-approved records are only valid while the session whitelist is active.
+			// Since we are here, the session is not currently whitelisted, so drop them.
+			if rec.State == ApprovalApproved && rec.AutoApproved {
+				delete(q.records, id)
+				if err := q.persistLocked(); err != nil {
+					_ = err
+				}
+				continue
+			}
 			switch rec.State {
 			case ApprovalApproved:
 				// Check if approval is still valid (not expired)
@@ -337,6 +346,9 @@ func (q *ApprovalQueue) IsCommandApproved(sessionID, command string) (*ApprovalR
 	now := q.clock()
 	for _, rec := range q.records {
 		if rec.SessionID == sessionID && rec.Command == command {
+			if rec.AutoApproved {
+				return nil, false
+			}
 			if rec.State == ApprovalApproved {
 				// Check if approval is still valid
 				if rec.ExpiresAt == nil || rec.ExpiresAt.After(now) {
