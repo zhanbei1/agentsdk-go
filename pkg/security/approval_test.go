@@ -471,12 +471,15 @@ func TestApprovalQueue_ApprovalExpiration(t *testing.T) {
 		t.Fatalf("NewApprovalQueue: %v", err)
 	}
 
-	// Approve with very short TTL
+	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
+	q.clock = clock.Now
+
+	// Approve with short TTL
 	rec, err := q.Request("session-1", "ls", nil)
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
-	if _, err := q.Approve(rec.ID, "admin", time.Millisecond); err != nil {
+	if _, err := q.Approve(rec.ID, "admin", time.Second); err != nil {
 		t.Fatalf("Approve: %v", err)
 	}
 
@@ -486,8 +489,8 @@ func TestApprovalQueue_ApprovalExpiration(t *testing.T) {
 		t.Error("expected command to be approved")
 	}
 
-	// Wait for expiration
-	time.Sleep(2 * time.Millisecond)
+	// Advance time past expiration.
+	clock.now = clock.now.Add(2 * time.Second)
 
 	// Should no longer be approved
 	_, ok = q.IsCommandApproved("session-1", "ls")
