@@ -6,7 +6,11 @@ An Agent SDK implemented in Go that implements core Claude Code-style runtime ca
 
 ## Overview
 
-agentsdk-go is a modular agent development framework that implements core Claude Code-style runtime capabilities (Hooks, MCP, Sandbox, Skills, Subagents, Commands, Tasks) and optionally exposes a six-point middleware interception mechanism. The SDK supports deployment scenarios across CLI, CI/CD, and enterprise platforms.
+agentsdk-go is a modular agent development framework that implements core Claude Code-style runtime capabilities (Hooks, MCP, Sandbox, Skills, Subagents) and optionally exposes a four-point middleware interception mechanism. The SDK supports deployment scenarios across CLI, CI/CD, and enterprise platforms.
+
+## Upgrading
+
+Breaking changes for the v2 refactor are tracked in `docs/refactor/UPGRADING-v2.md`.
 
 ### Dependencies
 
@@ -16,10 +20,9 @@ agentsdk-go is a modular agent development framework that implements core Claude
 
 ### Core Capabilities
 - **Multi-model Support**: Subagent-level model binding via `ModelFactory` interface
-- **Token Statistics**: Comprehensive token usage tracking with automatic accumulation
 - **Auto Compact**: Automatic context compression when token threshold reached
-- **Async Bash**: Background command execution with task management
-- **Rules Configuration**: `.claude/rules/` directory support with hot-reload
+- **Rules Configuration**: `.agents/rules/` directory support with hot-reload
+- **Safety Hook**: Go-native `PreToolUse` safety check for catastrophic bash commands (YOLO default)
 - **OpenTelemetry**: Distributed tracing with span propagation
 - **UUID Tracking**: Request-level UUID for observability
 
@@ -37,7 +40,8 @@ agentsdk-go is a modular agent development framework that implements core Claude
 - `examples/05-custom-tools` - Selective built-in tools and custom tool registration
 - `examples/07-multimodel` - Multi-model configuration demo
 - `examples/06-embed` - Embedded filesystem demo
-- `examples/09-task-system` - Task tracking and dependencies
+- `examples/08-safety-hook` - Built-in safety hook and DisableSafetyHook demo
+- `examples/09-compaction` - Prompt-compression compaction demo
 - `examples/10-hooks` - Hooks lifecycle events
 - `examples/11-reasoning` - Reasoning/thinking model support
 - `examples/12-multimodal` - Image and document input
@@ -46,54 +50,46 @@ agentsdk-go is a modular agent development framework that implements core Claude
 
 ### Core Layer
 
-- `pkg/agent` - Agent execution loop coordinating model calls and tool execution
-- `pkg/middleware` - Six interception points for extending the request/response lifecycle
+- `pkg/middleware` - Four interception points for extending the request/response lifecycle
 - `pkg/model` - Model adapters (Anthropic Claude, OpenAI-compatible)
 - `pkg/tool` - Tool registration and execution, including built-in tools and MCP tool support
-- `pkg/message` - Message history management with an LRU-based session cache
-- `pkg/api` - Unified API surface exposing SDK features
+- `pkg/message` - In-memory message history primitives
+- `pkg/api` - Unified API surface exposing SDK features (includes the agent loop)
 
 ### Feature Layer
 
-- `pkg/core/hooks` - Hooks executor covering seven lifecycle events with custom extensions
+- `pkg/hooks` - Hooks executor + event bus (merged from `pkg/core/events` + `pkg/core/hooks`)
 - `pkg/mcp` - MCP (Model Context Protocol) client bridging external tools (stdio/SSE) with automatic registration
 - `pkg/sandbox` - Sandbox isolation layer controlling filesystem and network access policies
 - `pkg/runtime/skills` - Skills management supporting scriptable loading and hot reload
 - `pkg/runtime/subagents` - Subagent management for multi-agent orchestration and scheduling
-- `pkg/runtime/commands` - Commands parser handling slash-command routing and parameter validation
-- `pkg/runtime/tasks` - Task tracking and dependency management
 
-In addition, the feature layer includes supporting packages such as `pkg/config` (configuration loading/hot reload), `pkg/core/events` (event bus), and `pkg/security` (command and path validation).
+In addition, the feature layer includes supporting packages such as `pkg/config` (configuration loading/hot reload) and `pkg/hooks` (event bus + hooks).
 
 ### Architecture Diagram
 
 ```mermaid
 flowchart TB
   subgraph Core
-    API[pkg/api] --> Agent[pkg/agent]
-    Agent --> Model[pkg/model]
-    Agent --> Tool[pkg/tool]
-    Agent --> Message[pkg/message]
-    Middleware[pkg/middleware] -. intercepts .-> Agent
+    API[pkg/api] --> Model[pkg/model]
+    API --> Tool[pkg/tool]
+    API --> Message[pkg/message]
+    Middleware[pkg/middleware] -. intercepts .-> API
   end
 
   subgraph Feature
     Config[pkg/config]
-    Hooks[pkg/core/hooks]
-    Events[pkg/core/events]
+    Hooks[pkg/hooks]
     Runtime[pkg/runtime/*]
     MCP[pkg/mcp]
     Sandbox[pkg/sandbox]
-    Security[pkg/security]
   end
 
   Config --> API
-  Hooks --> Agent
-  Events --> Agent
-  Runtime --> Agent
+  Hooks --> API
+  Runtime --> API
   MCP --> Tool
   Tool --> Sandbox
-  Tool --> Security
 ```
 
 ### Middleware Interception Points
@@ -106,12 +102,6 @@ User request
 before_agent  ← Request validation, audit logging
   ↓
 Agent loop
-  ↓
-before_model  ← Prompt processing, context optimization
-  ↓
-Model invocation
-  ↓
-after_model   ← Result filtering, content checks
   ↓
 before_tool   ← Tool parameter validation
   ↓
@@ -134,7 +124,7 @@ User response
 ### Get the SDK
 
 ```bash
-go get github.com/cexll/agentsdk-go
+go get github.com/stellarlinkco/agentsdk-go
 ```
 
 ## Quick Start
@@ -161,8 +151,8 @@ import (
     "fmt"
     "log"
 
-    "github.com/cexll/agentsdk-go/pkg/api"
-    "github.com/cexll/agentsdk-go/pkg/model"
+    "github.com/stellarlinkco/agentsdk-go/pkg/api"
+    "github.com/stellarlinkco/agentsdk-go/pkg/model"
 )
 
 func main() {
@@ -202,8 +192,8 @@ import (
     "log"
     "time"
 
-    "github.com/cexll/agentsdk-go/pkg/api"
-    "github.com/cexll/agentsdk-go/pkg/middleware"
+    "github.com/stellarlinkco/agentsdk-go/pkg/api"
+    "github.com/stellarlinkco/agentsdk-go/pkg/middleware"
 )
 
 // Logging middleware using the Funcs helper
@@ -310,7 +300,7 @@ Choose which built-ins to load and append your own tools:
 ```go
 rt, err := api.New(ctx, api.Options{
     ModelFactory:        provider,
-    EnabledBuiltinTools: []string{"bash", "file_read"}, // nil = all, empty = none
+    EnabledBuiltinTools: []string{"bash", "read"}, // nil = all, empty = none
     CustomTools:         []tool.Tool{&EchoTool{}},      // appended when Tools is empty
 })
 if err != nil {
@@ -334,8 +324,9 @@ The repository includes progressive examples:
 - `04-advanced` – full pipeline exercising middleware, hooks, MCP, sandbox, skills, and subagents.
 - `05-custom-tools` – selective built-ins plus custom tool registration.
 - `07-multimodel` – multi-model tier configuration.
-- `06-embed` – embedded filesystem for bundled `.claude` configs.
-- `09-task-system` – task tracking and dependency management.
+- `06-embed` – embedded filesystem for bundled `.agents/` configs.
+- `08-safety-hook` – built-in PreToolUse safety hook and DisableSafetyHook demo.
+- `09-compaction` – prompt-compression compaction.
 - `10-hooks` – hooks lifecycle events.
 - `11-reasoning` – reasoning/thinking model support.
 - `12-multimodal` – image and document input.
@@ -345,25 +336,20 @@ The repository includes progressive examples:
 ```
 agentsdk-go/
 ├── pkg/                        # Core packages
-│   ├── agent/                  # Agent core loop
-│   ├── middleware/             # Middleware system
-│   ├── model/                  # Model adapters
-│   ├── tool/                   # Tool system
-│   │   └── builtin/            # Built-in tools (bash, file, grep, glob)
-│   ├── message/                # Message history management
-│   ├── api/                    # Unified SDK interface
-│   ├── config/                 # Configuration loading
-│   ├── core/
-│   │   ├── events/             # Event bus
-│   │   └── hooks/              # Hooks executor
-│   ├── sandbox/                # Sandbox isolation
+│   ├── api/                    # Unified SDK interface (includes agent loop)
+│   ├── config/                 # Configuration loading & validation
+│   ├── gitignore/              # .gitignore matcher (glob/grep)
+│   ├── hooks/                  # Hook executor + 7 events
 │   ├── mcp/                    # MCP client
+│   ├── message/                # Message history management
+│   ├── middleware/             # Middleware chain (4 stages)
+│   ├── model/                  # Model adapters (Anthropic/OpenAI)
 │   ├── runtime/
 │   │   ├── skills/             # Skills management
-│   │   ├── subagents/          # Subagents management
-│   │   ├── commands/           # Commands parsing
-│   │   └── tasks/              # Task tracking and dependencies
-│   └── security/               # Security utilities
+│   │   └── subagents/          # Subagents management
+│   ├── sandbox/                # Filesystem/network/resource isolation
+│   └── tool/
+│       └── builtin/            # Built-in tools (bash/read/write/edit/glob/grep/skill)
 ├── cmd/cli/                    # CLI entrypoint
 ├── examples/                   # Example code
 │   ├── 01-basic/               # Minimal single request/response
@@ -377,35 +363,32 @@ agentsdk-go/
 
 ## Configuration
 
-The SDK uses the `.claude/` directory for configuration, compatible with Claude Code:
+The SDK uses the `.agents/` directory for configuration:
 
 ```
-.claude/
-├── settings.json     # Project configuration
+.agents/
+├── settings.json        # Project configuration
 ├── settings.local.json  # Local overrides (gitignored)
-├── rules/            # Rules definitions (markdown)
-├── skills/           # Skills definitions
-├── commands/         # Slash command definitions
-└── agents/           # Subagents definitions
+├── rules/               # Rules definitions (markdown)
+├── skills/              # Skills definitions
+└── agents/              # Subagents definitions
 ```
 
 Configuration precedence (high → low):
 - Runtime overrides (CLI/API-provided)
-- `.claude/settings.local.json`
-- `.claude/settings.json`
+- `.agents/settings.local.json`
+- `.agents/settings.json`
+- `~/.agents/settings.json` (global home directory config)
 - Built-in defaults (shipped with the SDK)
-
-`~/.claude` is no longer read; use project-scoped files for all configuration.
 
 ### Configuration Example
 
 ```json
 {
   "permissions": {
-    "allow": ["Bash(ls:*)", "Bash(pwd:*)"],
-    "deny": ["Read(.env)", "Read(secrets/**)"]
+    "additionalDirectories": []
   },
-  "disallowedTools": ["web_search", "web_fetch"],
+  "disallowedTools": ["bash"],
   "env": {
     "MY_VAR": "value"
   },
@@ -420,36 +403,17 @@ Configuration precedence (high → low):
 ```go
 rt, err := api.New(ctx, api.Options{
     ModelFactory: provider,
-    // Token tracking with callback
-    TokenTracking: true,
-    TokenCallback: func(stats api.TokenStats) {
-        log.Printf("Tokens: input=%d, output=%d, cache_read=%d",
-            stats.InputTokens, stats.OutputTokens, stats.CacheRead)
-    },
     // Auto compact settings
     AutoCompact: api.CompactConfig{
         Enabled:       true,
         Threshold:     0.8,   // Trigger compact at 80% of token limit
         PreserveCount: 5,     // Keep last 5 messages intact
-        SummaryModel:  "claude-haiku-4-5", // Use cheaper model for summarization
     },
-})
-```
-
-### Async Bash Execution
-
-```go
-// Start background task
-resp, _ := rt.Run(ctx, api.Request{
-    Prompt:    "Run 'sleep 10 && echo done' in background",
-    SessionID: "demo",
+    TokenLimit: 200000, // Model context window size hint (used for compaction decisions)
 })
 
-// Later, check task output
-resp, _ = rt.Run(ctx, api.Request{
-    Prompt:    "Get output of background task",
-    SessionID: "demo",
-})
+resp, _ := rt.Run(ctx, api.Request{Prompt: "hello"})
+log.Printf("Tokens: input=%d output=%d total=%d", resp.Result.Usage.InputTokens, resp.Result.Usage.OutputTokens, resp.Result.Usage.TotalTokens)
 ```
 
 ## HTTP API
@@ -501,7 +465,7 @@ The response format follows the Anthropic Messages API and includes these event 
 go test ./...
 
 # Core module tests
-go test ./pkg/agent/... ./pkg/middleware/... ./pkg/model/...
+go test ./pkg/api/... ./pkg/middleware/... ./pkg/model/...
 
 # Integration tests
 go test ./test/integration/...
@@ -544,45 +508,22 @@ make clean
 The SDK ships with the following built-in tools:
 
 ### Core Tools (under `pkg/tool/builtin/`)
-- `bash` - Execute shell commands with working directory and timeout configuration
-- `file_read` - Read file contents with offset/limit support
-- `file_write` - Write file contents (create or overwrite)
-- `file_edit` - Edit files with string replacement
-- `grep` - Regex search with recursion and file filtering
-- `glob` - File pattern matching with multiple patterns
+- `bash` - Execute commands via bash with a timeout and sandboxed working directory
+- `read` - Read file contents
+- `write` - Write file contents (create/overwrite)
+- `edit` - Edit files with string replacement
+- `glob` - File pattern matching
+- `grep` - Regex search
+- `skill` - Execute skills from `.agents/skills/`
 
-### Extended Tools
-- `web_fetch` - Fetch web content with prompt-based extraction
-- `web_search` - Web search with domain filtering
-- `bash_output` - Read output from background bash processes
-- `bash_status` - Poll status of background bash processes
-- `kill_task` - Terminate a running background bash process
-- `task_create` - Create a new task
-- `task_list` - List tasks
-- `task_get` - Get a task by ID
-- `task_update` - Update task status and dependencies
-- `ask_user_question` - Ask the user questions during execution
-- `skill` - Execute skills from `.claude/skills/`
-- `slash_command` - Execute slash commands from `.claude/commands/`
-- `task` - Spawn subagents for complex tasks (CLI/Platform entrypoints only)
-
-All built-in tools obey sandbox policies and are constrained by the path whitelist and command validator. Use `EnabledBuiltinTools` to selectively enable tools or `CustomTools` to register your own implementations.
+All built-in tools obey sandbox policies. Bash execution is additionally guarded by the built-in safety hook (can be disabled via `DisableSafetyHook=true`).
 
 ## Security Mechanisms
 
-### Three Layers of Defense
+### Sandbox + Safety Hook
 
-1. **Path whitelist**: Restricts filesystem access scope
-2. **Symlink resolution**: Prevents path traversal attacks
-3. **Command validation**: Blocks execution of dangerous commands
-
-### Command Validator
-
-Located at `pkg/security/validator.go`, it blocks the following by default:
-
-- Destructive commands: `dd`, `mkfs`, `fdisk`, `shutdown`, `reboot`
-- Hazardous delete patterns: `rm -rf`, `rm -r`, `rmdir -p`
-- Shell metacharacters: `|`, `;`, `&`, `>`, `<`, `` ` `` (in Platform mode)
+1. **Sandbox** (`pkg/sandbox`): filesystem / network / resource isolation (opt-in via settings/options)
+2. **Safety hook** (`pkg/hooks/safety.go`): Go-native `PreToolUse` check that blocks catastrophic bash commands in YOLO-default mode; disable via `DisableSafetyHook=true`
 
 ## Development Guide
 
@@ -636,14 +577,6 @@ customMiddleware := middleware.Funcs{
         // Post-response handling
         return nil
     },
-    OnBeforeModel: func(ctx context.Context, st *middleware.State) error {
-        // Before model call; st.ModelInput holds the model.Request
-        return nil
-    },
-    OnAfterModel: func(ctx context.Context, st *middleware.State) error {
-        // After model call; st.ModelOutput holds the *model.Response
-        return nil
-    },
     OnBeforeTool: func(ctx context.Context, st *middleware.State) error {
         // Before tool execution; st.ToolCall holds the agent.ToolCall
         return nil
@@ -664,7 +597,7 @@ customMiddleware := middleware.Funcs{
 
 ### Configuration-Driven
 
-- Manage all configuration under `.claude/`
+- Manage all configuration under `.agents/`
 - Supports hot reload without restarting the service
 - Declarative configuration preferred over imperative code
 
@@ -682,15 +615,15 @@ customMiddleware := middleware.Funcs{
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) - Detailed architecture analysis
+- [PRD (v2 refactor)](docs/refactor/PRD.md) - Stories/FR/Acceptance Matrix (ground truth)
+- [Architecture (v2 refactor)](docs/refactor/ARCHITECTURE-v2.md) - Ground-truth v2 architecture
 - [Getting Started](docs/getting-started.md) - Step-by-step tutorial
-- [API Reference](docs/api-reference.md) - API documentation
 - [Security](docs/security.md) - Security configuration guide
 - [Custom Tools Guide](docs/custom-tools-guide.md) - Custom tool registration and usage
-- [ACP Integration](docs/acp-integration.md) - ACP stdio and in-process integration, plus protocol coverage tests
 - [Trace System](docs/trace-system.md) - OpenTelemetry and HTTP trace setup
 - [Smart Defaults](docs/smart-defaults.md) - Auto-configuration by EntryPoint
 - [HTTP API Guide](examples/03-http/README.md) - HTTP server instructions
+- Legacy docs (v1, kept for historical reference only): `docs/architecture.md`, `docs/api-reference.md`
 
 ## Tech Stack
 

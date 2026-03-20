@@ -15,11 +15,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cexll/agentsdk-go/pkg/config"
+	"github.com/stellarlinkco/agentsdk-go/pkg/config"
 	"gopkg.in/yaml.v3"
 )
 
-// fileOps abstracts filesystem operations for testability.
 type fileOps struct {
 	readFile func(string) ([]byte, error)
 	openFile func(string) (fs.File, error)
@@ -54,19 +53,13 @@ func statFileOverrideOrOS(path string) (fs.FileInfo, error) {
 	return os.Stat(path)
 }
 
-// LoaderOptions controls how skills are discovered from the filesystem.
 type LoaderOptions struct {
 	ProjectRoot string
-	// Deprecated: user-level scanning has been removed; this field is ignored.
-	UserHome string
-	// Deprecated: user-level scanning has been removed; this flag is ignored.
-	EnableUser bool
-	// FS is the filesystem abstraction layer for loading skills.
-	// If nil, falls back to os.* functions for backward compatibility.
-	FS *config.FS
+	UserHome    string
+	EnableUser  bool
+	FS          *config.FS
 }
 
-// SkillFile captures an on-disk SKILL.md entry.
 type SkillFile struct {
 	Name     string
 	Path     string
@@ -74,10 +67,8 @@ type SkillFile struct {
 	fs       *config.FS
 }
 
-// readFile is swappable in tests to track filesystem IO.
 var readFile = os.ReadFile
 
-// ToolList supports YAML string or sequence, normalizing to a de-duplicated list.
 type ToolList []string
 
 func (t *ToolList) UnmarshalYAML(value *yaml.Node) error {
@@ -127,7 +118,6 @@ func (t *ToolList) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-// SkillMetadata mirrors the YAML frontmatter fields inside SKILL.md.
 type SkillMetadata struct {
 	Name          string            `yaml:"name"`
 	Description   string            `yaml:"description"`
@@ -137,7 +127,6 @@ type SkillMetadata struct {
 	AllowedTools  ToolList          `yaml:"allowed-tools,omitempty"`
 }
 
-// SkillRegistration wires a definition to its handler.
 type SkillRegistration struct {
 	Definition Definition
 	Handler    Handler
@@ -168,8 +157,8 @@ func LoadFromFS(opts LoaderOptions) ([]SkillRegistration, []error) {
 
 	ops := resolveFileOps(opts.FS)
 
-	projectDir := filepath.Join(opts.ProjectRoot, ".claude", "skills")
-	files, loadErrs := loadSkillDir(projectDir, fsLayer)
+	agentsDir := filepath.Join(opts.ProjectRoot, ".agents", "skills")
+	files, loadErrs := loadSkillDirFn(agentsDir, fsLayer)
 	errs = append(errs, loadErrs...)
 	allFiles = append(allFiles, files...)
 
@@ -206,6 +195,8 @@ func LoadFromFS(opts LoaderOptions) ([]SkillRegistration, []error) {
 
 	return registrations, errs
 }
+
+var loadSkillDirFn = loadSkillDir
 
 func loadSkillDir(root string, fsLayer *config.FS) ([]SkillFile, []error) {
 	var (
@@ -525,10 +516,6 @@ func loadSkillContent(file SkillFile) (Result, error) {
 			count += len(files)
 		}
 		meta["support-file-count"] = count
-	}
-
-	if len(meta) == 0 {
-		meta = nil
 	}
 
 	return Result{

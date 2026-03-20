@@ -7,27 +7,18 @@ import (
 	"os"
 	"strings"
 
-	"github.com/cexll/agentsdk-go/pkg/security"
-	"github.com/cexll/agentsdk-go/pkg/tool"
+	"github.com/stellarlinkco/agentsdk-go/pkg/sandbox"
+	"github.com/stellarlinkco/agentsdk-go/pkg/tool"
 )
 
-const editDescription = `Performs exact string replacements in files.
-
-Usage:
-- You must use your 'Read' tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.
-- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: spaces + line number + tab. Everything after that tab is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.
-- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
-- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
-- The edit will FAIL if 'old_string' is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use 'replace_all' to change every instance of 'old_string'.
-- Use 'replace_all' for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.
-`
+const editDescription = `Performs exact string replacements within the configured sandbox (old_string must be unique unless replace_all).`
 
 var editSchema = &tool.JSONSchema{
 	Type: "object",
 	Properties: map[string]interface{}{
 		"file_path": map[string]interface{}{
 			"type":        "string",
-			"description": "The absolute path to the file to modify",
+			"description": "Path to the file to modify (absolute or relative to the sandbox root).",
 		},
 		"old_string": map[string]interface{}{
 			"type":        "string",
@@ -62,11 +53,11 @@ func NewEditToolWithRoot(root string) *EditTool {
 }
 
 // NewEditToolWithSandbox builds an EditTool using a custom sandbox.
-func NewEditToolWithSandbox(root string, sandbox *security.Sandbox) *EditTool {
-	return &EditTool{base: newFileSandboxWithSandbox(root, sandbox)}
+func NewEditToolWithSandbox(root string, policy sandbox.FileSystemPolicy) *EditTool {
+	return &EditTool{base: newFileSandboxWithSandbox(root, policy)}
 }
 
-func (e *EditTool) Name() string { return "Edit" }
+func (e *EditTool) Name() string { return "edit" }
 
 func (e *EditTool) Description() string { return editDescription }
 
@@ -76,7 +67,7 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 	if ctx == nil {
 		return nil, errors.New("context is nil")
 	}
-	if e == nil || e.base == nil || e.base.sandbox == nil {
+	if e == nil || e.base == nil {
 		return nil, errors.New("edit tool is not initialised")
 	}
 	path, err := e.resolveFilePath(params)
@@ -137,9 +128,6 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 
 	if e.base.maxBytes > 0 && int64(len(updated)) > e.base.maxBytes {
 		return nil, fmt.Errorf("edited content exceeds %d bytes limit", e.base.maxBytes)
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
 	}
 	if err := os.WriteFile(path, []byte(updated), info.Mode()); err != nil {
 		return nil, fmt.Errorf("write file: %w", err)

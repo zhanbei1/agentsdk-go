@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -33,6 +34,18 @@ func loadSettings(t *testing.T, projectRoot string, runtimeOverrides *Settings) 
 	settings, err := loader.Load()
 	require.NoError(t, err)
 	return settings
+}
+
+func TestSettingsLoader_AbsFailure_ReturnsError(t *testing.T) {
+	old := filepathAbs
+	filepathAbs = func(string) (string, error) { return "", errors.New("abs boom") }
+	t.Cleanup(func() { filepathAbs = old })
+
+	loader := SettingsLoader{ProjectRoot: "x"}
+	_, loadErr := loader.Load()
+
+	require.Error(t, loadErr)
+	require.Contains(t, loadErr.Error(), "resolve project root:")
 }
 
 func TestSettingsLoader_SingleLayer(t *testing.T) {
@@ -355,4 +368,32 @@ func TestLoadJSONFileMissingReturnsNil(t *testing.T) {
 	settings, err := loadJSONFile(filepath.Join(t.TempDir(), "missing.json"), nil)
 	require.NoError(t, err)
 	require.Nil(t, settings)
+}
+
+func TestSettingsLoader_GlobalAgentsLayerIsLoaded(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	require.NoError(t, os.MkdirAll(projectRoot, 0o755))
+
+	globalPath := filepath.Join(home, ".agents", "settings.json")
+	writeSettingsFile(t, globalPath, Settings{Model: "global"})
+
+	loader := SettingsLoader{ProjectRoot: projectRoot}
+	got, err := loader.Load()
+	require.NoError(t, err)
+	require.Equal(t, "global", got.Model)
+}
+
+func TestSettingsLoader_ProjectOverridesGlobal(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	projectRoot, projectPath, _ := newIsolatedPaths(t)
+	writeSettingsFile(t, filepath.Join(home, ".agents", "settings.json"), Settings{Model: "global"})
+	writeSettingsFile(t, projectPath, Settings{Model: "project"})
+
+	got := loadSettings(t, projectRoot, nil)
+	require.Equal(t, "project", got.Model)
 }

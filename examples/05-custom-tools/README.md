@@ -12,7 +12,7 @@ go run ./examples/05-custom-tools
 ```
 
 ## What happens
-- Registers built-ins `bash` and `file_read` (because `EnabledBuiltinTools` lists them)
+- Registers built-ins `bash` and `read` (because `EnabledBuiltinTools` lists them)
 - Skips other built-ins (empty list would disable all)
 - Appends a custom `echo` tool
 - Sends a prompt instructing the model to call `echo`

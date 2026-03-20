@@ -9,13 +9,15 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
-	"github.com/cexll/agentsdk-go/pkg/api"
-	"github.com/cexll/agentsdk-go/pkg/config"
-	"github.com/cexll/agentsdk-go/pkg/runtime/commands"
-	"github.com/cexll/agentsdk-go/pkg/tool"
+	"github.com/stellarlinkco/agentsdk-go/examples/internal/demomodel"
+	"github.com/stellarlinkco/agentsdk-go/pkg/api"
+	"github.com/stellarlinkco/agentsdk-go/pkg/config"
+	"github.com/stellarlinkco/agentsdk-go/pkg/model"
+	"github.com/stellarlinkco/agentsdk-go/pkg/tool"
 )
 
 type runConfig struct {
@@ -34,7 +36,6 @@ type runConfig struct {
 	diskLimit         uint64
 	enableSkills      bool
 	enableSubagents   bool
-	enableCommands    bool
 	enableTrace       bool
 	traceDir          string
 	traceSkills       bool
@@ -52,25 +53,51 @@ type runConfig struct {
 	severity          string
 }
 
+var (
+	advancedFatal = log.Fatal
+	osGetwd       = os.Getwd
+	filepathAbs   = filepath.Abs
+)
+
+type advancedRuntime interface {
+	Run(context.Context, api.Request) (*api.Response, error)
+	Close() error
+}
+
+var newAPIRuntime = func(ctx context.Context, opts api.Options) (advancedRuntime, error) {
+	return api.New(ctx, opts)
+}
+
 func main() {
 	cfg := parseConfig()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if err := run(ctx, cfg); err != nil {
+		advancedFatal(err)
+	}
+}
+
+func run(ctx context.Context, cfg runConfig) error {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	apiKey := demomodel.AnthropicAPIKey()
+	if strings.TrimSpace(apiKey) == "" {
+		return fmt.Errorf("ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) is required")
+	}
 
 	projectRoot := cfg.projectRoot
 	if projectRoot == "" {
-		wd, err := os.Getwd()
+		wd, err := osGetwd()
 		if err != nil {
-			log.Fatalf("resolve working dir: %v", err)
+			return fmt.Errorf("resolve working dir: %w", err)
 		}
 		projectRoot = wd
 	}
-	absRoot, err := filepath.Abs(projectRoot)
+	absRoot, err := filepathAbs(projectRoot)
 	if err != nil {
-		log.Fatalf("resolve project root: %v", err)
+		return fmt.Errorf("resolve project root: %w", err)
 	}
 
 	settingsOverride := &config.Settings{Env: map[string]string{"ADVANCED_EXAMPLE": "true"}}
@@ -84,7 +111,11 @@ func main() {
 		ProjectRoot:       absRoot,
 		SettingsLoader:    &config.SettingsLoader{ProjectRoot: absRoot},
 		SettingsOverrides: settingsOverride,
-		Model:             newDemoModel(absRoot, cfg.owner, cfg.enableMCP, settingsOverride),
+		ModelFactory: &model.AnthropicProvider{
+			APIKey:    apiKey,
+			BaseURL:   demomodel.AnthropicBaseURL(),
+			ModelName: "claude-sonnet-4-5-20250929",
+		},
 		Tools:             []tool.Tool{newObserveLogsTool(cfg.toolLatency, logger, settingsOverride)},
 		Middleware:        mw.items,
 		MiddlewareTimeout: cfg.middlewareTimeout,
@@ -104,10 +135,6 @@ func main() {
 		opts.Skills = buildSkills()
 	}
 
-	if cfg.enableCommands {
-		opts.Commands = buildCommands()
-	}
-
 	if cfg.enableSubagents {
 		opts.Subagents = buildSubagents()
 	}
@@ -116,16 +143,13 @@ func main() {
 		opts.Sandbox = buildSandboxOptions(cfg, absRoot)
 	}
 
-	rt, err := api.New(ctx, opts)
+	rt, err := newAPIRuntime(ctx, opts)
 	if err != nil {
-		log.Fatalf("build runtime: %v", err)
+		return fmt.Errorf("build runtime: %w", err)
 	}
 	defer rt.Close()
 
 	prompt := cfg.prompt
-	if cfg.enableCommands {
-		prompt = prompt + "\n" + demoScript()
-	}
 
 	req := api.Request{
 		Prompt:    prompt,
@@ -146,10 +170,11 @@ func main() {
 
 	resp, err := rt.Run(ctx, req)
 	if err != nil {
-		log.Fatalf("run agent: %v", err)
+		return fmt.Errorf("run agent: %w", err)
 	}
 
 	printSummary(resp, cfg, mw, hooks)
+	return nil
 }
 
 func parseConfig() runConfig {
@@ -170,7 +195,6 @@ func parseConfig() runConfig {
 	flag.IntVar(&diskMB, "disk-mb", 16, "disk limit in MB")
 	flag.BoolVar(&cfg.enableSkills, "enable-skills", true, "enable skills registry")
 	flag.BoolVar(&cfg.enableSubagents, "enable-subagents", true, "enable subagent dispatcher")
-	flag.BoolVar(&cfg.enableCommands, "enable-commands", true, "enable slash commands parser")
 	flag.BoolVar(&cfg.enableTrace, "enable-trace", true, "record trace middleware output")
 	flag.StringVar(&cfg.traceDir, "trace-dir", "trace-out", "trace output directory")
 	flag.BoolVar(&cfg.traceSkills, "trace-skills", false, "log skill body lengths before/after agent run")
@@ -195,7 +219,11 @@ func parseConfig() runConfig {
 
 func printSummary(resp *api.Response, cfg runConfig, mw middlewareBundle, hooks hookBundle) {
 	fmt.Println("\n===== Final Output =====")
-	if resp == nil || resp.Result == nil {
+	if resp == nil {
+		fmt.Println("(no result)")
+		return
+	}
+	if resp.Result == nil {
 		fmt.Println("(no result)")
 	} else {
 		fmt.Println(resp.Result.Output)
@@ -204,13 +232,6 @@ func printSummary(resp *api.Response, cfg runConfig, mw middlewareBundle, hooks 
 			for _, call := range resp.Result.ToolCalls {
 				fmt.Printf("- %s -> %v\n", call.Name, call.Arguments)
 			}
-		}
-	}
-
-	if cfg.enableCommands && len(resp.CommandResults) > 0 {
-		fmt.Println("\nCommands executed:")
-		for _, res := range resp.CommandResults {
-			fmt.Printf("/%s -> %v\n", res.Definition.Name, res.Result.Output)
 		}
 	}
 
@@ -270,12 +291,5 @@ func printSummary(resp *api.Response, cfg runConfig, mw middlewareBundle, hooks 
 	}
 
 	fmt.Println("\nCommand parse preview:")
-	if cfg.enableCommands {
-		invocations, err := commands.Parse(demoScript())
-		if err == nil {
-			for _, line := range dumpInvocations(invocations) {
-				fmt.Println("- " + line)
-			}
-		}
-	}
+	fmt.Println("(disabled in v2)")
 }
