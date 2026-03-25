@@ -476,12 +476,7 @@ type runtimeHookAdapter struct {
 
 func (h *runtimeHookAdapter) PreToolUse(ctx context.Context, evt hooks.ToolUsePayload) (map[string]any, error) {
 	params := evt.Params
-	if h == nil {
-		if err := hooks.SafetyCheck(evt.Name, params); err != nil {
-			return nil, err
-		}
-		return params, nil
-	}
+
 	if !h.disableSafetyHook {
 		if err := hooks.SafetyCheck(evt.Name, params); err != nil {
 			return nil, err

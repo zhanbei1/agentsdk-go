@@ -156,7 +156,6 @@ func applySettingsLayerCandidates(dst *Settings, name string, paths []string, fi
 			continue
 		}
 
-		log.Printf("settings: applying %s layer from %s", name, path)
 		if next := MergeSettings(dst, cfg); next != nil {
 			*dst = *next
 		}
@@ -164,11 +163,9 @@ func applySettingsLayerCandidates(dst *Settings, name string, paths []string, fi
 	}
 
 	if nonEmpty == 0 {
-		log.Printf("settings: %s layer skipped (no path)", name)
 		return nil
 	}
 
-	log.Printf("settings: %s layer not found", name)
 	return nil
 }
 
