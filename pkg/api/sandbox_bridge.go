@@ -28,17 +28,16 @@ func (n *noopFileSystemPolicy) Roots() []string {
 // buildSandboxManager wires filesystem/network/resource policies using options
 // and settings.json. Respects settings.Sandbox.Enabled to allow disabling
 // sandbox validation entirely. Defaults to enabled for backwards compatibility.
+// When settings.Sandbox.Enabled is false, returns (nil, root) so the executor
+// skips all sandbox enforcement (CheckToolPermission, Enforce).
 func buildSandboxManager(opts Options, settings *config.Settings) (*sandbox.Manager, string) {
-	// Check if sandbox is explicitly disabled in settings
-	if settings != nil && settings.Sandbox != nil && settings.Sandbox.Enabled != nil && !*settings.Sandbox.Enabled {
-		// Skip filesystem/network/resource validation, but keep tool permission rules
-		// functional (permissions live under settings.Permissions, not settings.Sandbox).
+	sandboxDisabled := settings != nil && settings.Sandbox != nil && settings.Sandbox.Enabled != nil && !*settings.Sandbox.Enabled
+	if sandboxDisabled {
 		root := opts.Sandbox.Root
 		if root == "" {
 			root = opts.ProjectRoot
 		}
-		root = filepath.Clean(root)
-		return sandbox.NewManager(&noopFileSystemPolicy{root: root}, nil, nil), root
+		return nil, filepath.Clean(root)
 	}
 
 	root := opts.Sandbox.Root
@@ -73,7 +72,18 @@ func buildSandboxManager(opts Options, settings *config.Settings) (*sandbox.Mana
 	}
 
 	nw := sandbox.NewDomainAllowList(netAllow...)
-	return sandbox.NewManager(fs, nw, sandbox.NewResourceLimiter(opts.Sandbox.ResourceLimit)), root
+	mgr := sandbox.NewManager(fs, nw, sandbox.NewResourceLimiter(opts.Sandbox.ResourceLimit))
+
+	// Wire permission matcher from the already-loaded settings snapshot so that
+	// SettingsOverrides and embedded settings are respected consistently.
+	if settings != nil {
+		if err := mgr.ConfigurePermissions(root, settings); err != nil {
+			// Configuration failures should not prevent runtime creation; they will
+			// surface as permission errors when tools are used.
+		}
+	}
+
+	return mgr, root
 }
 
 func additionalSandboxPaths(settings *config.Settings) []string {

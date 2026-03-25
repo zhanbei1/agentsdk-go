@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cexll/agentsdk-go/pkg/config"
 	"github.com/cexll/agentsdk-go/pkg/security"
 )
 
@@ -181,11 +182,70 @@ func (m *Manager) PermissionAudits() []security.PermissionAudit {
 	return m.permSandbox.PermissionAudits()
 }
 
+// ConfigurePermissions wires a permission matcher from a pre-loaded settings snapshot.
+// This lets callers reuse the same Settings instance used elsewhere in the runtime
+// instead of re-loading .claude/settings.json from disk.
+func (m *Manager) ConfigurePermissions(root string, settings *config.Settings) error {
+	if m == nil {
+		return nil
+	}
+	if settings == nil {
+		// Explicitly clear permissions when settings are nil so the sandbox
+		// defaults to allow.
+		m.permRoot = strings.TrimSpace(root)
+		m.permSandbox = nil
+		m.permOnce = sync.Once{}
+		m.permErr = nil
+		return nil
+	}
+
+	cleanRoot := strings.TrimSpace(root)
+	if cleanRoot == "" {
+		cleanRoot = m.permRoot
+	}
+	if cleanRoot == "" && m.fs != nil {
+		if roots := m.fs.Roots(); len(roots) > 0 {
+			cleanRoot = strings.TrimSpace(roots[0])
+		}
+	}
+
+	var sb *security.Sandbox
+	if strings.TrimSpace(cleanRoot) != "" {
+		sb = security.NewSandbox(cleanRoot)
+	}
+	if sb == nil {
+		// No effective root => no permission matcher, default to allow.
+		m.permRoot = ""
+		m.permSandbox = nil
+		m.permOnce = sync.Once{}
+		m.permErr = nil
+		return nil
+	}
+
+	matcher, err := security.NewPermissionMatcher(settings.Permissions)
+	if err != nil {
+		m.permRoot = cleanRoot
+		m.permSandbox = sb
+		m.permOnce = sync.Once{}
+		m.permErr = err
+		return err
+	}
+
+	sb.SetPermissionMatcher(matcher)
+	m.permRoot = cleanRoot
+	m.permSandbox = sb
+	m.permOnce = sync.Once{}
+	m.permErr = nil
+	return nil
+}
+
 func (m *Manager) ensurePermissionsLoaded() error {
 	m.permOnce.Do(func() {
 		if m.permSandbox == nil {
 			return
 		}
+		// Backwards compatibility: if ConfigurePermissions was not called, fall
+		// back to loading permissions from disk using the original behaviour.
 		if err := m.permSandbox.LoadPermissions(m.permRoot); err != nil {
 			m.permErr = err
 		}

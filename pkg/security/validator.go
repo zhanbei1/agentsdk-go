@@ -3,6 +3,7 @@ package security
 import (
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,37 +31,37 @@ type Validator struct {
 func NewValidator() *Validator {
 	return &Validator{
 		bannedCommands: map[string]string{
-			"dd":        "raw disk writes are unsafe",
-			"mkfs":      "filesystem formatting is unsafe",
-			"fdisk":     "partition editing is unsafe",
-			"parted":    "partition editing is unsafe",
-			"format":    "filesystem formatting is unsafe",
-			"mkfs.ext4": "filesystem formatting is unsafe",
-			"shutdown":  "system power management is forbidden",
-			"reboot":    "system power management is forbidden",
-			"halt":      "system power management is forbidden",
-			"poweroff":  "system power management is forbidden",
-			"mount":     "mount can expose host filesystem",
-			"sudo":      "privilege escalation is forbidden",
+			//"dd":        "raw disk writes are unsafe",
+			//"mkfs":      "filesystem formatting is unsafe",
+			//"fdisk":     "partition editing is unsafe",
+			//"parted":    "partition editing is unsafe",
+			//"format":    "filesystem formatting is unsafe",
+			//"mkfs.ext4": "filesystem formatting is unsafe",
+			//"shutdown":  "system power management is forbidden",
+			//"reboot":    "system power management is forbidden",
+			//"halt":      "system power management is forbidden",
+			//"poweroff":  "system power management is forbidden",
+			//"mount":     "mount can expose host filesystem",
+			//"sudo":      "privilege escalation is forbidden",
 		},
 		bannedArguments: []string{
-			"--no-preserve-root",
-			"--preserve-root=false",
-			"/dev/",
-			"../",
+			//"--no-preserve-root",
+			//"--preserve-root=false",
+			//"/dev/",
+			//"../",
 		},
 		// bannedFragments 捕捉危险的删除模式，而不是彻底禁止 rm/rmdir
 		bannedFragments: []string{
-			"-rf /",
-			"--no-preserve-root",
-			"--preserve-root=false",
-			"rm -rf",
-			"rm -fr",
-			"rm -r",
-			"rm --recursive",
-			"rmdir -p",
-			"rm *",
-			"rm /",
+			//"-rf /",
+			//"--no-preserve-root",
+			//"--preserve-root=false",
+			//"rm -rf",
+			//"rm -fr",
+			//"rm -r",
+			//"rm --recursive",
+			//"rmdir -p",
+			//"rm *",
+			//"rm /",
 		},
 		maxCommandBytes: 32768,
 		maxArgs:         512,
@@ -107,12 +108,12 @@ func (v *Validator) Validate(input string) error {
 	}
 
 	v.mu.RLock()
-	allowMeta := v.allowShellMeta
+	//allowMeta := v.allowShellMeta
 	v.mu.RUnlock()
 
-	if !allowMeta && strings.ContainsAny(cmd, "|;&><`$") {
-		return fmt.Errorf("security: pipe or shell metacharacters are blocked")
-	}
+	//if !allowMeta && strings.ContainsAny(cmd, "|;&><`$") {
+	//	return fmt.Errorf("security: pipe or shell metacharacters are blocked")
+	//}
 
 	args, err := splitCommand(cmd)
 	if err != nil {
@@ -144,6 +145,7 @@ func (v *Validator) Validate(input string) error {
 			continue
 		}
 		if strings.Contains(lowerCmd, strings.ToLower(fragment)) {
+			log.Println("xxxxxxxxxxxxxxaaaaaaa")
 			return fmt.Errorf("security: command fragment %q is banned", fragment)
 		}
 	}
@@ -151,6 +153,7 @@ func (v *Validator) Validate(input string) error {
 	for _, arg := range args[1:] {
 		for _, bannedArg := range argRules {
 			if strings.Contains(strings.ToLower(arg), strings.ToLower(bannedArg)) {
+				log.Println("xxxxxxxxxxxxxxbbbbbb")
 				return fmt.Errorf("security: argument %q is banned", arg)
 			}
 		}

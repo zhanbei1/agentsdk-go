@@ -682,6 +682,7 @@ customMiddleware := middleware.Funcs{
 
 ## Documentation
 
+- [Learning Guide](docs/learning-guide.md) - 深入学习指南：整体架构、数据流、核心组件
 - [Architecture](docs/architecture.md) - Detailed architecture analysis
 - [Getting Started](docs/getting-started.md) - Step-by-step tutorial
 - [API Reference](docs/api-reference.md) - API documentation

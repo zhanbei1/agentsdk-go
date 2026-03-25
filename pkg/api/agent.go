@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/cexll/agentsdk-go/pkg/tool/builtin"
 	"log"
 	"maps"
 	"net/url"
@@ -26,7 +27,6 @@ import (
 	"github.com/cexll/agentsdk-go/pkg/sandbox"
 	"github.com/cexll/agentsdk-go/pkg/security"
 	"github.com/cexll/agentsdk-go/pkg/tool"
-	toolbuiltin "github.com/cexll/agentsdk-go/pkg/tool/builtin"
 	"github.com/google/uuid"
 )
 
@@ -160,7 +160,26 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	if err := registerMCPServers(ctx, registry, sbox, mcpServers); err != nil {
 		return nil, err
 	}
-	executor := tool.NewExecutor(registry, sbox).WithOutputPersister(tool.NewOutputPersister())
+	persister := tool.NewOutputPersister()
+	if settings != nil && settings.ToolOutput != nil {
+		cfg := settings.ToolOutput
+		if cfg.DefaultThresholdBytes > 0 {
+			persister.DefaultThresholdBytes = cfg.DefaultThresholdBytes
+		}
+		if len(cfg.PerToolThresholdBytes) > 0 {
+			perTool := make(map[string]int, len(cfg.PerToolThresholdBytes))
+			for name, v := range cfg.PerToolThresholdBytes {
+				canon := strings.ToLower(strings.TrimSpace(name))
+				if canon == "" || v <= 0 {
+					continue
+				}
+				perTool[canon] = v
+			}
+			persister.PerToolThresholdBytes = perTool
+		}
+	}
+
+	executor := tool.NewExecutor(registry, sbox).WithOutputPersister(persister)
 
 	recorder := defaultHookRecorder()
 	hooks := newHookExecutor(opts, recorder, settings)

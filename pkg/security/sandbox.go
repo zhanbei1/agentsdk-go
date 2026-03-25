@@ -56,6 +56,21 @@ func NewDisabledSandbox() *Sandbox {
 	}
 }
 
+// SetPermissionMatcher injects a pre-built permission matcher and marks it as
+// loaded, bypassing on-demand loading from disk. When matcher is nil, the
+// sandbox falls back to allowing all tool calls.
+func (s *Sandbox) SetPermissionMatcher(m *PermissionMatcher) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.permissions = m
+	s.permLoaded = true
+	s.permErr = nil
+	s.auditLog = nil
+}
+
 // AllowShellMetachars enables shell pipes and metacharacters (CLI mode).
 func (s *Sandbox) AllowShellMetachars(allow bool) {
 	if s != nil && s.validator != nil {

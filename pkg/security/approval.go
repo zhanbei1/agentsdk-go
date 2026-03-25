@@ -50,6 +50,9 @@ type ApprovalQueue struct {
 	mu        sync.Mutex
 	cond      *sync.Cond
 	storePath string
+	// Optional load/save replace file I/O when both are non-nil.
+	loadFn    func() ([]byte, error)
+	saveFn    func([]byte) error
 	records   map[string]*ApprovalRecord
 	whitelist map[string]time.Time
 	clock     func() time.Time
@@ -70,14 +73,36 @@ func NewApprovalQueue(storePath string) (*ApprovalQueue, error) {
 	return q, nil
 }
 
+// NewApprovalQueueWithPersistence builds a queue that loads/saves via callbacks instead of a JSON file.
+// storePath is a logical label (e.g. for logging); loadFn/saveFn must not be nil.
+func NewApprovalQueueWithPersistence(storePath string, loadFn func() ([]byte, error), saveFn func([]byte) error) (*ApprovalQueue, error) {
+	if loadFn == nil || saveFn == nil {
+		return nil, fmt.Errorf("security: loadFn and saveFn required")
+	}
+	q := &ApprovalQueue{
+		storePath: storePath,
+		loadFn:    loadFn,
+		saveFn:    saveFn,
+		records:   make(map[string]*ApprovalRecord),
+		whitelist: make(map[string]time.Time),
+		clock:     time.Now,
+	}
+	q.cond = sync.NewCond(&q.mu)
+	if err := q.load(); err != nil {
+		return nil, err
+	}
+	return q, nil
+}
+
 // Request enqueues a command for approval.
 // Logic:
 // 1. If session is in whitelist (and not expired), auto-approve
 // 2. Check records for existing session_id + command combination
-//    - If found approved (and not expired), auto-approve
-//    - If found approved but expired, create new pending record
-//    - If found denied, return error
-//    - If found pending, return existing record
+//   - If found approved (and not expired), auto-approve
+//   - If found approved but expired, create new pending record
+//   - If found denied, return error
+//   - If found pending, return existing record
+//
 // 3. Otherwise, create new pending record
 func (q *ApprovalQueue) Request(sessionID, command string, paths []string) (*ApprovalRecord, error) {
 	if sessionID == "" {
@@ -418,6 +443,32 @@ func (q *ApprovalQueue) CleanupExpired() error {
 }
 
 func (q *ApprovalQueue) load() error {
+	if q.loadFn != nil {
+		data, err := q.loadFn()
+		if err != nil {
+			return fmt.Errorf("security: load approvals: %w", err)
+		}
+		if len(data) == 0 {
+			return nil
+		}
+		var snapshot approvalSnapshot
+		if err := json.Unmarshal(data, &snapshot); err != nil {
+			return fmt.Errorf("security: parse approvals: %w", err)
+		}
+		now := q.clock()
+		for _, rec := range snapshot.Records {
+			if rec.State == ApprovalApproved && rec.ExpiresAt != nil && rec.ExpiresAt.Before(now) {
+				continue
+			}
+			q.records[rec.ID] = rec
+		}
+		for session, expiry := range snapshot.Whitelist {
+			if expiry.After(now) {
+				q.whitelist[session] = expiry
+			}
+		}
+		return nil
+	}
 	if q.storePath == "" {
 		return nil
 	}
@@ -460,6 +511,23 @@ func (q *ApprovalQueue) load() error {
 }
 
 func (q *ApprovalQueue) persistLocked() error {
+	if q.saveFn != nil {
+		snapshot := approvalSnapshot{
+			Records:   make([]*ApprovalRecord, 0, len(q.records)),
+			Whitelist: make(map[string]time.Time, len(q.whitelist)),
+		}
+		for _, rec := range q.records {
+			snapshot.Records = append(snapshot.Records, rec)
+		}
+		for session, expiry := range q.whitelist {
+			snapshot.Whitelist[session] = expiry
+		}
+		data, err := json.MarshalIndent(snapshot, "", "  ")
+		if err != nil {
+			return fmt.Errorf("security: encode approvals: %w", err)
+		}
+		return q.saveFn(data)
+	}
 	if q.storePath == "" {
 		return nil
 	}

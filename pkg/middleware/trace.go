@@ -26,6 +26,8 @@ type TraceMiddleware struct {
 	mu          sync.Mutex
 	clock       func() time.Time
 	traceSkills bool
+	// persistHook is called after each HTML render with session id and output paths (files are written).
+	persistHook func(sessionID, jsonPath, htmlPath string)
 }
 
 type traceSession struct {
@@ -62,6 +64,13 @@ type TraceOption func(*TraceMiddleware)
 func WithSkillTracing(enabled bool) TraceOption {
 	return func(tm *TraceMiddleware) {
 		tm.traceSkills = enabled
+	}
+}
+
+// WithTracePersist registers a hook invoked after each HTML trace render (files on disk are up to date).
+func WithTracePersist(fn func(sessionID, jsonPath, htmlPath string)) TraceOption {
+	return func(tm *TraceMiddleware) {
+		tm.persistHook = fn
 	}
 }
 
@@ -331,6 +340,9 @@ func (m *TraceMiddleware) renderHTML(sess *traceSession) error {
 
 	if err := writeAtomic(sess.htmlPath, buf.Bytes()); err != nil {
 		return err
+	}
+	if m.persistHook != nil {
+		m.persistHook(sess.id, sess.jsonPath, sess.htmlPath)
 	}
 	return nil
 }
