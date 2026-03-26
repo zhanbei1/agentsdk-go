@@ -178,7 +178,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(execCtx, "bash", "-lc", command)
+	cmd := exec.CommandContext(execCtx, "bash", "-c", command)
 	cmd.Env = os.Environ()
 	cmd.Dir = workdir
 
