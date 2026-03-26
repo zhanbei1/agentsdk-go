@@ -349,4 +349,25 @@ func (rt *Runtime) Sandbox() *sandbox.Manager {
 	return rt.executor.Sandbox()
 }
 
+// ForgetSession removes in-memory history for sessionID, clears bash/tool spool
+// dirs for that session, and skips persistence loader once on the next Get so
+// a deleted session is not repopulated immediately. HTTP or UI layers must
+// still enforce deleted sessions in their own stores (e.g. return 404 from
+// GET /message when the session row is gone).
+func (rt *Runtime) ForgetSession(sessionID string) {
+	if rt == nil || rt.histories == nil {
+		return
+	}
+	rt.histories.Remove(strings.TrimSpace(sessionID))
+}
+
+// HasSessionHistory reports whether the runtime currently holds in-memory
+// history for the session (after at least one prepare/run touched that id).
+func (rt *Runtime) HasSessionHistory(sessionID string) bool {
+	if rt == nil || rt.histories == nil {
+		return false
+	}
+	return rt.histories.HasHistory(sessionID)
+}
+
 // ----------------- internal helpers -----------------

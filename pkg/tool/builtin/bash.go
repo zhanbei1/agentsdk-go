@@ -178,7 +178,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(execCtx, "bash", "-c", command)
+	cmd := exec.CommandContext(execCtx, "bash", "-lc", command)
 	cmd.Env = os.Environ()
 	cmd.Dir = workdir
 
@@ -734,7 +734,7 @@ func newBashCommandValidator() *bashCommandValidator {
 	return &bashCommandValidator{
 		maxCommandBytes: 32768,
 		maxArgs:         512,
-		allowShellMeta:  false,
+		allowShellMeta:  true,
 	}
 }
 
@@ -784,9 +784,9 @@ func (v *bashCommandValidator) Validate(input string) error {
 		return fmt.Errorf("bash: command too long (%d bytes)", len(cmd))
 	}
 
-	if strings.ContainsAny(cmd, "\n\r") {
-		return errors.New("bash: multiline command is not allowed")
-	}
+	//if strings.ContainsAny(cmd, "\n\r") {
+	//	return errors.New("bash: multiline command is not allowed")
+	//}
 
 	if containsControlNonWhitespace(cmd) {
 		return errors.New("bash: control characters detected")

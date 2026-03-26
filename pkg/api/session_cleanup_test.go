@@ -4,9 +4,86 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/stellarlinkco/agentsdk-go/pkg/message"
 )
+
+func TestHistoryStoreRemoveSkipsLoaderOnce(t *testing.T) {
+	store := newHistoryStore(10)
+	loaded := false
+	store.loader = func(id string) ([]message.Message, error) {
+		_ = id
+		loaded = true
+		return []message.Message{{Role: "user", Content: "hi"}}, nil
+	}
+	h1 := store.Get("s1")
+	if h1.Len() != 1 || !loaded {
+		t.Fatalf("expected loader on first get, len=%d loaded=%v", h1.Len(), loaded)
+	}
+	loaded = false
+	store.Remove("s1")
+	h2 := store.Get("s1")
+	if h2.Len() != 0 {
+		t.Fatalf("expected empty history after remove, got len=%d", h2.Len())
+	}
+	if loaded {
+		t.Fatalf("expected loader skipped once after Remove")
+	}
+	if store.Get("s1") != h2 {
+		t.Fatalf("expected stable history pointer for session")
+	}
+}
+
+func TestHistoryStoreRemoveThenEvictReloadsFromLoader(t *testing.T) {
+	store := newHistoryStore(1)
+	aLoads := 0
+	store.loader = func(id string) ([]message.Message, error) {
+		if id == "a" {
+			aLoads++
+		}
+		return []message.Message{{Role: "user", Content: strconv.Itoa(aLoads) + ":" + id}}, nil
+	}
+	store.Get("a")
+	if aLoads != 1 {
+		t.Fatalf("unexpected initial aLoads=%d", aLoads)
+	}
+	store.Remove("a")
+	store.Get("a")
+	if aLoads != 1 {
+		t.Fatalf("after Remove+Get, loader should be skipped for a: aLoads=%d", aLoads)
+	}
+	time.Sleep(50 * time.Millisecond)
+	store.Get("b")
+	store.Get("a")
+	if aLoads != 2 {
+		t.Fatalf("after eviction of a, loader should run again for a: aLoads=%d", aLoads)
+	}
+}
+
+func TestRuntimeForgetSessionAndHasHistory(t *testing.T) {
+	rt := &Runtime{histories: newHistoryStore(10)}
+	if rt.HasSessionHistory("x") {
+		t.Fatal("expected no history before use")
+	}
+	rt.histories.Get("x")
+	if !rt.HasSessionHistory("x") {
+		t.Fatal("expected history after Get")
+	}
+	rt.ForgetSession("x")
+	if rt.HasSessionHistory("x") {
+		t.Fatal("expected no history after ForgetSession")
+	}
+}
+
+func TestHistoryStoreHasHistoryTrimsBlank(t *testing.T) {
+	store := newHistoryStore(10)
+	if store.HasHistory("  ") {
+		t.Fatal("blank id should not match")
+	}
+}
 
 func TestSessionEvictionCleansToolOutputDir(t *testing.T) {
 	store := newHistoryStore(1)

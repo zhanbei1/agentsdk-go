@@ -188,6 +188,31 @@
       color: var(--muted);
     }
 
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      z-index: 1000;
+      max-width: min(90vw, 360px);
+      padding: 12px 18px;
+      background: var(--card);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 12px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+      font-size: 14px;
+      text-align: center;
+      line-height: 1.45;
+      pointer-events: none;
+      opacity: 0;
+      transform: translateX(-50%) translateY(12px);
+      transition: opacity 0.22s ease, transform 0.22s ease;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
     @media (max-width: 640px) {
       body { padding: 12px; }
       header { flex-wrap: wrap; }
@@ -199,10 +224,11 @@
   <div class="app">
     <header>
       <h1>Agent 对话</h1>
-      <span class="pill">session: web-chat-session</span>
+      <span class="pill" id="session-pill">session: …</span>
       <span class="status" id="status"></span>
       <div style="margin-left:auto; display:flex; gap:8px;">
-        <button class="ghost" id="clear">清空</button>
+        <button type="button" class="ghost" id="share" title="复制当前会话分享链接">分享</button>
+        <button type="button" class="ghost" id="clear">清空</button>
       </div>
     </header>
 
@@ -219,10 +245,71 @@
     </div>
   </div>
 
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
   <script>
-    // 常量设定
-    const SESSION_ID = 'web-chat-session';
     const ENDPOINT = '/v1/run/stream';
+
+    const sessionPillEl = document.getElementById('session-pill');
+    const shareBtn = document.getElementById('share');
+
+    function pickInitialSessionId() {
+      const fromQuery = new URLSearchParams(window.location.search).get('session');
+      const trimmed = typeof fromQuery === 'string' ? fromQuery.trim() : '';
+      if (trimmed) return trimmed;
+      return 'web-chat-session';
+    }
+
+    let sessionId = pickInitialSessionId();
+
+    function syncSessionPill() {
+      sessionPillEl.textContent = `session: ${sessionId}`;
+    }
+    syncSessionPill();
+
+    let toastHideTimer = null;
+    function showToast(message) {
+      const el = document.getElementById('toast');
+      el.textContent = message;
+      el.hidden = false;
+      clearTimeout(toastHideTimer);
+      requestAnimationFrame(() => el.classList.add('show'));
+      toastHideTimer = setTimeout(() => {
+        el.classList.remove('show');
+        setTimeout(() => {
+          el.hidden = true;
+        }, 230);
+      }, 2400);
+    }
+
+    async function copyShareLink() {
+      const u = new URL(window.location.href);
+      u.searchParams.set('session', sessionId);
+      const shareURL = u.toString();
+      try {
+        await navigator.clipboard.writeText(shareURL);
+        showToast('分享链接已复制到剪贴板');
+      } catch (_) {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = shareURL;
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+          showToast('分享链接已复制到剪贴板');
+        } catch (err) {
+          window.prompt('复制以下分享链接：', shareURL);
+          showToast('请手动复制链接');
+        }
+      }
+    }
+
+    shareBtn.addEventListener('click', () => {
+      copyShareLink();
+    });
 
     // DOM 引用
     const chatEl = document.getElementById('chat');
@@ -489,7 +576,7 @@
       setBusy(true, '思考中…');
       blockState.clear();
 
-      const payload = JSON.stringify({ prompt, session_id: SESSION_ID });
+      const payload = JSON.stringify({ prompt, session_id: sessionId });
       let response;
       try {
         response = await fetch(ENDPOINT, {

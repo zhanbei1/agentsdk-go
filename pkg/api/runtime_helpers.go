@@ -300,12 +300,13 @@ func mergeSubagentRegistrations(manual []SubagentRegistration, project []subagen
 }
 
 type historyStore struct {
-	mu       sync.Mutex
-	data     map[string]*message.History
-	lastUsed map[string]time.Time
-	maxSize  int
-	onEvict  func(string)
-	loader   func(string) ([]message.Message, error)
+	mu             sync.Mutex
+	data           map[string]*message.History
+	lastUsed       map[string]time.Time
+	maxSize        int
+	onEvict        func(string)
+	loader         func(string) ([]message.Message, error)
+	skipNextLoader map[string]struct{} // ForgetSession: next Get must not repopulate from loader
 }
 
 func newHistoryStore(maxSize int) *historyStore {
@@ -330,6 +331,13 @@ func (s *historyStore) Get(id string) *message.History {
 		s.mu.Unlock()
 		return hist
 	}
+	skipLoaderOnce := false
+	if s.skipNextLoader != nil {
+		if _, ok := s.skipNextLoader[id]; ok {
+			skipLoaderOnce = true
+			delete(s.skipNextLoader, id)
+		}
+	}
 	hist := message.NewHistory()
 	s.data[id] = hist
 	s.lastUsed[id] = now
@@ -340,7 +348,7 @@ func (s *historyStore) Get(id string) *message.History {
 		evicted = s.evictOldest()
 	}
 	s.mu.Unlock()
-	if loader != nil {
+	if !skipLoaderOnce && loader != nil {
 		if loaded, err := loader(id); err == nil && len(loaded) > 0 {
 			hist.Replace(loaded)
 		}
@@ -352,6 +360,50 @@ func (s *historyStore) Get(id string) *message.History {
 		}
 	}
 	return hist
+}
+
+// Remove drops the session history from memory and clears sandbox temp dirs for
+// that session. The next Get for this id skips the optional loader once so a
+// deleted session is not immediately repopulated from persistence.
+func (s *historyStore) Remove(id string) {
+	if s == nil {
+		return
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+	var cb func(string)
+	s.mu.Lock()
+	delete(s.data, id)
+	delete(s.lastUsed, id)
+	if s.skipNextLoader == nil {
+		s.skipNextLoader = map[string]struct{}{}
+	}
+	s.skipNextLoader[id] = struct{}{}
+	cb = s.onEvict
+	s.mu.Unlock()
+
+	_ = cleanupBashOutputSessionDir(id)
+	_ = cleanupToolOutputSessionDir(id)
+	if cb != nil {
+		cb(id)
+	}
+}
+
+// HasHistory reports whether an in-memory history exists for the session.
+func (s *historyStore) HasHistory(id string) bool {
+	if s == nil {
+		return false
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	s.mu.Lock()
+	_, ok := s.data[id]
+	s.mu.Unlock()
+	return ok
 }
 
 func (s *historyStore) evictOldest() string {
