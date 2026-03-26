@@ -179,7 +179,8 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}
 
 	cmd := exec.CommandContext(execCtx, "bash", "-c", command)
-	cmd.Env = os.Environ()
+	// Leave Env nil so the child inherits the current environment without
+	// copying os.Environ() on every invocation (large envs made simple tools slow).
 	cmd.Dir = workdir
 
 	spool := newBashOutputSpool(ctx, b.effectiveOutputThresholdBytes())
@@ -396,26 +397,26 @@ func resolveRoot(dir string) string {
 }
 
 type bashOutputSpool struct {
-	threshold  int
-	outputPath string
-	stdout     *tool.SpoolWriter
-	stderr     *tool.SpoolWriter
+	threshold int
+	ctx       context.Context
+
+	pathMu     sync.Mutex
+	outputPath string // lazy: set on first spill or when Finalize needs a file path
+
+	stdout *tool.SpoolWriter
+	stderr *tool.SpoolWriter
 }
 
 func newBashOutputSpool(ctx context.Context, threshold int) *bashOutputSpool {
-	sessionID := bashSessionID(ctx)
-	dir := filepath.Join(bashOutputBaseDir(), sanitizePathComponent(sessionID))
-	filename := bashOutputFilename()
-	outputPath := filepath.Join(dir, filename)
-
 	spool := &bashOutputSpool{
-		threshold:  threshold,
-		outputPath: outputPath,
+		threshold: threshold,
+		ctx:       ctx,
 	}
 	spool.stdout = tool.NewSpoolWriter(threshold, func() (io.WriteCloser, string, error) {
-		return openBashOutputFile(outputPath)
+		return openBashOutputFile(spool.ensureOutputPathForSpill())
 	})
 	spool.stderr = tool.NewSpoolWriter(threshold, func() (io.WriteCloser, string, error) {
+		dir := spool.sessionOutputDir()
 		if err := ensureBashOutputDir(dir); err != nil {
 			return nil, "", err
 		}
@@ -426,6 +427,35 @@ func newBashOutputSpool(ctx context.Context, threshold int) *bashOutputSpool {
 		return f, f.Name(), nil
 	})
 	return spool
+}
+
+func (s *bashOutputSpool) sessionOutputDir() string {
+	sessionID := bashSessionID(s.ctx)
+	return filepath.Join(bashOutputBaseDir(), sanitizePathComponent(sessionID))
+}
+
+// ensureOutputPathLocked sets outputPath once and returns it. Caller must hold s.pathMu.
+func (s *bashOutputSpool) ensureOutputPathLocked() string {
+	if s.outputPath != "" {
+		return s.outputPath
+	}
+	s.outputPath = filepath.Join(s.sessionOutputDir(), bashOutputFilename())
+	return s.outputPath
+}
+
+// ensureOutputPathForSpill is used when stdout crosses the in-memory threshold (may run
+// concurrently with stderr spill; must be mutex-safe).
+func (s *bashOutputSpool) ensureOutputPathForSpill() string {
+	s.pathMu.Lock()
+	defer s.pathMu.Unlock()
+	return s.ensureOutputPathLocked()
+}
+
+// ensureOutputPath is used from Finalize after cmd.Run (no concurrent spill).
+func (s *bashOutputSpool) ensureOutputPath() string {
+	s.pathMu.Lock()
+	defer s.pathMu.Unlock()
+	return s.ensureOutputPathLocked()
 }
 
 func (s *bashOutputSpool) StdoutWriter() io.Writer { return s.stdout }
@@ -468,21 +498,23 @@ func (s *bashOutputSpool) Finalize() (string, string, error) {
 		if len(combined) <= s.threshold {
 			return combined, "", closeErr
 		}
-		if err := ensureBashOutputDir(filepath.Dir(s.outputPath)); err != nil {
+		outPath := s.ensureOutputPath()
+		if err := ensureBashOutputDir(filepath.Dir(outPath)); err != nil {
 			return combined, "", errors.Join(closeErr, err)
 		}
-		if err := os.WriteFile(s.outputPath, []byte(combined), 0o600); err != nil {
+		if err := os.WriteFile(outPath, []byte(combined), 0o600); err != nil {
 			return combined, "", errors.Join(closeErr, err)
 		}
-		return formatBashOutputReference(s.outputPath), s.outputPath, closeErr
+		return formatBashOutputReference(outPath), outPath, closeErr
 	}
 
 	if stdoutPath == "" {
-		if err := ensureBashOutputDir(filepath.Dir(s.outputPath)); err != nil {
+		outPath := s.ensureOutputPath()
+		if err := ensureBashOutputDir(filepath.Dir(outPath)); err != nil {
 			combined := combineOutput(s.stdout.String(), s.stderr.String())
 			return combined, "", errors.Join(closeErr, err)
 		}
-		out, err := os.OpenFile(s.outputPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+		out, err := os.OpenFile(outPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 		if err != nil {
 			combined := combineOutput(s.stdout.String(), s.stderr.String())
 			return combined, "", errors.Join(closeErr, err)
@@ -494,10 +526,11 @@ func (s *bashOutputSpool) Finalize() (string, string, error) {
 		if err := bashFileClose(out); err != nil {
 			return "", "", errors.Join(closeErr, err)
 		}
-		return formatBashOutputReference(s.outputPath), s.outputPath, closeErr
+		return formatBashOutputReference(outPath), outPath, closeErr
 	}
 
-	out, err := os.OpenFile(s.outputPath, os.O_RDWR, 0)
+	outPath := s.ensureOutputPath()
+	out, err := os.OpenFile(outPath, os.O_RDWR, 0)
 	if err != nil {
 		return "", "", errors.Join(closeErr, err)
 	}
@@ -513,7 +546,7 @@ func (s *bashOutputSpool) Finalize() (string, string, error) {
 	if err := bashFileClose(out); err != nil {
 		return "", "", errors.Join(closeErr, err)
 	}
-	return formatBashOutputReference(s.outputPath), s.outputPath, closeErr
+	return formatBashOutputReference(outPath), outPath, closeErr
 }
 
 func writeCombinedOutput(out *os.File, stdoutText, stderrPath, stderrText string) error {
