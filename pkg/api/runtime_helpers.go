@@ -52,6 +52,42 @@ func availableToolsFromList(tools []tool.Tool, whitelist map[string]struct{}) []
 	return defs
 }
 
+// availableToolsSkylark exposes only tools allowed by progressive unlock state.
+func availableToolsSkylark(registry *tool.Registry, allow *skylarkAllowState) []model.ToolDefinition {
+	if registry == nil || allow == nil {
+		return nil
+	}
+	allowed := allow.allowedMap()
+	return availableToolsFromListAllowSet(registry.List(), allowed)
+}
+
+func availableToolsFromListAllowSet(tools []tool.Tool, allowed map[string]struct{}) []model.ToolDefinition {
+	if len(allowed) == 0 {
+		return nil
+	}
+	defs := make([]model.ToolDefinition, 0, len(allowed))
+	for _, impl := range tools {
+		if impl == nil {
+			continue
+		}
+		name := strings.TrimSpace(impl.Name())
+		if name == "" {
+			continue
+		}
+		canon := canonicalToolName(name)
+		if _, ok := allowed[canon]; !ok {
+			continue
+		}
+		defs = append(defs, model.ToolDefinition{
+			Name:        name,
+			Description: strings.TrimSpace(impl.Description()),
+			Parameters:  schemaToMap(impl.Schema()),
+		})
+	}
+	sort.Slice(defs, func(i, j int) bool { return defs[i].Name < defs[j].Name })
+	return defs
+}
+
 func schemaToMap(schema *tool.JSONSchema) map[string]any {
 	if schema == nil {
 		return nil

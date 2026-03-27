@@ -124,16 +124,21 @@ type Options struct {
 	HookTimeout       time.Duration
 	DisableSafetyHook bool
 
-	Skills           []SkillRegistration
-	Subagents        []SubagentRegistration
-	Sandbox          SandboxOptions
-	AutoCompact      CompactConfig
-	OTEL             OTELConfig
-	fsLayer          *config.FS
-	settingsSnapshot *config.Settings
-	skReg            *skills.Registry
-	subMgr           *subagents.Manager
-	tracer           Tracer
+	Skills    []SkillRegistration
+	Subagents []SubagentRegistration
+	// Skylark enables progressive retrieval (Bleve + optional embeddings); see docs/skylark.md.
+	Skylark     *SkylarkOptions
+	Sandbox     SandboxOptions
+	AutoCompact CompactConfig
+	OTEL        OTELConfig
+	// DisableParallelToolCalls forces sequential tool execution within a single model turn.
+	// When false (default), independent tool calls run concurrently after BeforeTool hooks.
+	DisableParallelToolCalls bool
+	fsLayer                  *config.FS
+	settingsSnapshot         *config.Settings
+	skReg                    *skills.Registry
+	subMgr                   *subagents.Manager
+	tracer                   Tracer
 }
 
 func DefaultSubagentDefinitions() []subagents.Definition {
@@ -245,6 +250,10 @@ func (o Options) withDefaults() Options {
 	if o.MaxSessions <= 0 {
 		o.MaxSessions = defaultMaxSessions
 	}
+
+	if o.Skylark != nil && o.Skylark.SimplePromptMaxRunes <= 0 {
+		o.Skylark.SimplePromptMaxRunes = 10
+	}
 	return o
 }
 
@@ -311,6 +320,14 @@ func (o Options) frozen() Options {
 			subCopy[i].Definition = def
 		}
 		o.Subagents = subCopy
+	}
+	if o.Skylark != nil {
+		sk := *o.Skylark
+		if o.Skylark.EnableOneShotRouting != nil {
+			v := *o.Skylark.EnableOneShotRouting
+			sk.EnableOneShotRouting = &v
+		}
+		o.Skylark = &sk
 	}
 
 	o.Sandbox = freezeSandboxOptions(o.Sandbox)

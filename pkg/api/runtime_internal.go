@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	hooks "github.com/stellarlinkco/agentsdk-go/pkg/hooks"
@@ -14,6 +15,7 @@ import (
 	"github.com/stellarlinkco/agentsdk-go/pkg/model"
 	"github.com/stellarlinkco/agentsdk-go/pkg/runtime/skills"
 	"github.com/stellarlinkco/agentsdk-go/pkg/runtime/subagents"
+	toolpkg "github.com/stellarlinkco/agentsdk-go/pkg/tool"
 )
 
 type preparedRun struct {
@@ -27,6 +29,8 @@ type preparedRun struct {
 	subagentResult *subagents.Result
 	mode           ModeContext
 	toolWhitelist  map[string]struct{}
+	// skylarkProgressive is false when Skylark one-shot routing uses full tools + memory re-injection.
+	skylarkProgressive bool
 }
 
 type runResult struct {
@@ -55,11 +59,25 @@ func (rt *Runtime) prepare(ctx context.Context, req Request) (preparedRun, error
 
 	activation := normalized.activationContext(prompt)
 
-	skillRes, promptAfterSkills, err := rt.executeSkills(ctx, prompt, activation, &normalized)
-	if err != nil {
-		return preparedRun{}, err
+	skylarkProgressive := false
+	if rt.opts.Skylark != nil && rt.opts.Skylark.Enabled {
+		skylarkProgressive = true
+		if isSkylarkSimplePrompt(prompt, rt.opts.Skylark) {
+			skylarkProgressive = false
+		}
 	}
-	prompt = promptAfterSkills
+
+	var skillRes []SkillExecution
+	var err error
+	skipAutoSkills := skylarkProgressive && rt.opts.Skylark != nil && rt.opts.Skylark.Enabled && !rt.opts.Skylark.KeepAutoSkills
+	if !skipAutoSkills {
+		var afterSkills string
+		skillRes, afterSkills, err = rt.executeSkills(ctx, prompt, activation, &normalized)
+		if err != nil {
+			return preparedRun{}, err
+		}
+		prompt = afterSkills
+	}
 	activation.Prompt = prompt
 	subRes, promptAfterSubagent, err := rt.executeSubagent(ctx, prompt, activation, &normalized)
 	if err != nil {
@@ -69,16 +87,17 @@ func (rt *Runtime) prepare(ctx context.Context, req Request) (preparedRun, error
 	activation.Prompt = prompt
 	whitelist := combineToolWhitelists(normalized.ToolWhitelist, nil)
 	return preparedRun{
-		ctx:            ctx,
-		prompt:         prompt,
-		contentBlocks:  normalized.ContentBlocks,
-		history:        history,
-		normalized:     normalized,
-		recorder:       recorder,
-		skillResults:   skillRes,
-		subagentResult: subRes,
-		mode:           normalized.Mode,
-		toolWhitelist:  whitelist,
+		ctx:                ctx,
+		prompt:             prompt,
+		contentBlocks:      normalized.ContentBlocks,
+		history:            history,
+		normalized:         normalized,
+		recorder:           recorder,
+		skillResults:       skillRes,
+		subagentResult:     subRes,
+		mode:               normalized.Mode,
+		toolWhitelist:      whitelist,
+		skylarkProgressive: skylarkProgressive,
 	}, nil
 }
 
@@ -111,6 +130,9 @@ func (rt *Runtime) runAgentWithMiddleware(prep preparedRun, extras ...middleware
 		root:      rt.sbRoot,
 		host:      "localhost",
 		sessionID: prep.normalized.SessionID,
+	}
+	if rt.opts.Skylark != nil && rt.opts.Skylark.Enabled && prep.skylarkProgressive {
+		toolExec.skylark = newSkylarkAllowState(prep.toolWhitelist)
 	}
 
 	chainItems := make([]middleware.Middleware, 0, len(rt.opts.Middleware)+len(extras))
@@ -169,10 +191,21 @@ func (rt *Runtime) runLoop(prep preparedRun, mdl model.Model, hookAdapter *runti
 
 	ctx = context.WithValue(ctx, model.MiddlewareStateKey, state)
 
+	if rt.opts.Skylark != nil && rt.opts.Skylark.Enabled {
+		bundle := &skylarkRunBundle{History: prep.history}
+		if prep.skylarkProgressive && tools != nil && tools.skylark != nil {
+			bundle.Allow = tools.skylark
+		}
+		applySkylarkBundleDefaults(bundle, rt.opts.Skylark)
+		ctx = withSkylarkRun(ctx, bundle)
+	}
+
 	systemPrompt := rt.opts.SystemPrompt
+	if rt.opts.Skylark != nil && rt.opts.Skylark.Enabled && !prep.skylarkProgressive {
+		systemPrompt = augmentSkylarkOneShotSystemPrompt(systemPrompt, rt.skylarkAgentsMD, rt.skylarkRulesMD)
+	}
 
 	trimmer := rt.newTrimmer()
-	toolDefs := availableTools(rt.registry, prep.toolWhitelist)
 
 	tracer := rt.opts.tracer
 	agentSpan := SpanContext(nil)
@@ -212,6 +245,13 @@ func (rt *Runtime) runLoop(prep preparedRun, mdl model.Model, hookAdapter *runti
 				runErr = err
 				return last, err
 			}
+		}
+
+		var toolDefs []model.ToolDefinition
+		if rt.opts.Skylark != nil && rt.opts.Skylark.Enabled && prep.skylarkProgressive && tools != nil && tools.skylark != nil {
+			toolDefs = availableToolsSkylark(rt.registry, tools.skylark)
+		} else {
+			toolDefs = availableTools(rt.registry, prep.toolWhitelist)
 		}
 
 		snapshot := prep.history.All()
@@ -295,9 +335,14 @@ func (rt *Runtime) runLoop(prep preparedRun, mdl model.Model, hookAdapter *runti
 			return last, err
 		}
 		if len(resp.Message.ToolCalls) > 0 {
+			calls := resp.Message.ToolCalls
 			var firstMiddlewareErr error
-			for _, call := range resp.Message.ToolCalls {
-				state.ToolCall = call
+			type prepSlot struct {
+				prep toolPreparation
+			}
+			preps := make([]prepSlot, len(calls))
+			for i := range calls {
+				state.ToolCall = calls[i]
 				if err := chain.Execute(ctx, middleware.StageBeforeTool, state); err != nil && firstMiddlewareErr == nil {
 					firstMiddlewareErr = err
 				}
@@ -305,23 +350,74 @@ func (rt *Runtime) runLoop(prep preparedRun, mdl model.Model, hookAdapter *runti
 					runErr = errors.New("api: tool executor is nil")
 					return last, errors.New("api: tool executor is nil")
 				}
+				preps[i].prep = tools.prepareToolCall(ctx, calls[i])
+			}
+
+			type invokeOut struct {
+				res     *toolpkg.CallResult
+				execErr error
+				content string
+			}
+			outs := make([]invokeOut, len(calls))
+
+			runInvoke := func(i int) {
+				p := preps[i].prep
+				call := p.Call
+				switch {
+				case p.Denied != nil, p.EmptyArgsResult != nil, p.PreHookErr != nil:
+					if p.EmptyArgsResult != nil {
+						outs[i].res = p.EmptyArgsResult
+						if p.EmptyArgsResult.Result != nil {
+							outs[i].content = p.EmptyArgsResult.Result.Output
+						}
+					}
+					if p.PreHookErr != nil {
+						outs[i].execErr = p.PreHookErr
+						outs[i].content = fmt.Sprintf(`{"error":%q}`, p.PreHookErr.Error())
+					}
+					return
+				default:
+				}
 				toolSpan := SpanContext(nil)
 				if tracer != nil {
 					toolSpan = tracer.StartToolSpan(agentSpan, strings.TrimSpace(call.Name))
 				}
-				res, toolErr := tools.Execute(ctx, call)
+				res, err, content := tools.invokeToolCall(ctx, call)
 				if tracer != nil {
 					tracer.EndSpan(toolSpan, map[string]any{
 						"session_id":  strings.TrimSpace(prep.normalized.SessionID),
 						"request_id":  strings.TrimSpace(prep.normalized.RequestID),
 						"tool_use_id": strings.TrimSpace(call.ID),
 						"tool_name":   strings.TrimSpace(call.Name),
-					}, toolErr)
+					}, err)
 				}
-				state.ToolResult = res
+				outs[i] = invokeOut{res: res, execErr: err, content: content}
+			}
+
+			parallel := !rt.opts.DisableParallelToolCalls && len(calls) > 1
+			if parallel {
+				var wg sync.WaitGroup
+				for i := range calls {
+					wg.Add(1)
+					go func(i int) {
+						defer wg.Done()
+						runInvoke(i)
+					}(i)
+				}
+				wg.Wait()
+			} else {
+				for i := range calls {
+					runInvoke(i)
+				}
+			}
+
+			for i := range calls {
+				state.ToolCall = calls[i]
+				state.ToolResult = outs[i].res
 				if err := chain.Execute(ctx, middleware.StageAfterTool, state); err != nil && firstMiddlewareErr == nil {
 					firstMiddlewareErr = err
 				}
+				_ = tools.finalizeToolCall(ctx, preps[i].prep.Call, outs[i].res, outs[i].execErr, outs[i].content, preps[i].prep)
 			}
 			if firstMiddlewareErr != nil {
 				runErr = firstMiddlewareErr

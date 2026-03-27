@@ -11,6 +11,7 @@ import (
 	"github.com/stellarlinkco/agentsdk-go/pkg/config"
 	hooks "github.com/stellarlinkco/agentsdk-go/pkg/hooks"
 	"github.com/stellarlinkco/agentsdk-go/pkg/sandbox"
+	"github.com/stellarlinkco/agentsdk-go/pkg/skylark"
 	"github.com/stellarlinkco/agentsdk-go/pkg/tool"
 )
 
@@ -42,13 +43,16 @@ func streamEmitFromContext(ctx context.Context) streamEmitFunc {
 
 // Runtime exposes the unified SDK surface that powers CLI/CI/enterprise entrypoints.
 type Runtime struct {
-	opts      Options
-	sbRoot    string
-	registry  *tool.Registry
-	executor  *tool.Executor
-	hooks     *hooks.Executor
-	histories *historyStore
-	compactor *compactor
+	opts            Options
+	sbRoot          string
+	registry        *tool.Registry
+	executor        *tool.Executor
+	hooks           *hooks.Executor
+	histories       *historyStore
+	compactor       *compactor
+	skylarkEngine   *skylark.Engine
+	skylarkAgentsMD string
+	skylarkRulesMD  string
 
 	mu sync.RWMutex
 
@@ -72,13 +76,18 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		log.Printf("claude hooks materializer warning: %v", err)
 	}
 
+	var agentsMD string
+	skylarkOn := opts.Skylark != nil && opts.Skylark.Enabled
 	if memory, err := config.LoadAgentsMD(opts.ProjectRoot, fsLayer); err != nil {
 		log.Printf("agents.md loader warning: %v", err)
-	} else if strings.TrimSpace(memory) != "" {
-		if strings.TrimSpace(opts.SystemPrompt) == "" {
-			opts.SystemPrompt = fmt.Sprintf("## Memory\n\n%s", strings.TrimSpace(memory))
-		} else {
-			opts.SystemPrompt = fmt.Sprintf("%s\n\n## Memory\n\n%s", strings.TrimSpace(opts.SystemPrompt), strings.TrimSpace(memory))
+	} else {
+		agentsMD = strings.TrimSpace(memory)
+		if agentsMD != "" && !skylarkOn {
+			if strings.TrimSpace(opts.SystemPrompt) == "" {
+				opts.SystemPrompt = fmt.Sprintf("## Memory\n\n%s", agentsMD)
+			} else {
+				opts.SystemPrompt = fmt.Sprintf("%s\n\n## Memory\n\n%s", strings.TrimSpace(opts.SystemPrompt), agentsMD)
+			}
 		}
 	}
 
@@ -116,6 +125,41 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	if err := registerMCPServers(ctx, registry, sbox, mcpServers); err != nil {
 		return nil, err
 	}
+
+	var rulesMD string
+	if opts.RulesEnabled == nil || (opts.RulesEnabled != nil && *opts.RulesEnabled) {
+		loader := config.NewRulesLoader(opts.ProjectRoot)
+		if _, err := loader.LoadRules(); err != nil {
+			log.Printf("rules loader warning: %v", err)
+		} else {
+			rulesMD = strings.TrimSpace(loader.GetContent())
+			if rulesMD != "" && !skylarkOn {
+				if strings.TrimSpace(opts.SystemPrompt) == "" {
+					opts.SystemPrompt = fmt.Sprintf("## Project Rules\n\n%s", rulesMD)
+				} else {
+					opts.SystemPrompt = fmt.Sprintf("%s\n\n## Project Rules\n\n%s", strings.TrimSpace(opts.SystemPrompt), rulesMD)
+				}
+			}
+		}
+		if err := loader.Close(); err != nil {
+			log.Printf("rules loader close warning: %v", err)
+		}
+	}
+
+	var skylarkEng *skylark.Engine
+	if skylarkOn {
+		var err error
+		skylarkEng, err = buildSkylarkEngine(ctx, opts, settings, agentsMD, rulesMD, registry)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(opts.SystemPrompt) == "" {
+			opts.SystemPrompt = skylarkSystemPromptAppend()
+		} else {
+			opts.SystemPrompt = strings.TrimSpace(opts.SystemPrompt) + "\n\n" + skylarkSystemPromptAppend()
+		}
+	}
+
 	executor := tool.NewExecutor(registry, sbox).WithOutputPersister(tool.NewOutputPersister())
 
 	hooks := newHookExecutor(opts, settings)
@@ -127,32 +171,19 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	}
 	opts.tracer = tracer
 
-	if opts.RulesEnabled == nil || (opts.RulesEnabled != nil && *opts.RulesEnabled) {
-		loader := config.NewRulesLoader(opts.ProjectRoot)
-		if _, err := loader.LoadRules(); err != nil {
-			log.Printf("rules loader warning: %v", err)
-		} else if rules := strings.TrimSpace(loader.GetContent()); rules != "" {
-			if strings.TrimSpace(opts.SystemPrompt) == "" {
-				opts.SystemPrompt = fmt.Sprintf("## Project Rules\n\n%s", rules)
-			} else {
-				opts.SystemPrompt = fmt.Sprintf("%s\n\n## Project Rules\n\n%s", strings.TrimSpace(opts.SystemPrompt), rules)
-			}
-		}
-		if err := loader.Close(); err != nil {
-			log.Printf("rules loader close warning: %v", err)
-		}
-	}
-
 	histories := newHistoryStore(opts.MaxSessions)
 
 	rt := &Runtime{
-		opts:      opts,
-		sbRoot:    sbRoot,
-		registry:  registry,
-		executor:  executor,
-		hooks:     hooks,
-		histories: histories,
-		compactor: compactor,
+		opts:            opts,
+		sbRoot:          sbRoot,
+		registry:        registry,
+		executor:        executor,
+		hooks:           hooks,
+		histories:       histories,
+		compactor:       compactor,
+		skylarkEngine:   skylarkEng,
+		skylarkAgentsMD: agentsMD,
+		skylarkRulesMD:  rulesMD,
 	}
 	return rt, nil
 }
@@ -310,6 +341,11 @@ func (rt *Runtime) Close() error {
 		}
 		if rt.registry != nil {
 			rt.registry.Close()
+		}
+		if rt.skylarkEngine != nil {
+			if e := rt.skylarkEngine.Close(); e != nil {
+				log.Printf("api: skylark engine close: %v", e)
+			}
 		}
 		if rt.opts.tracer != nil {
 			if e := rt.opts.tracer.Shutdown(); e != nil {

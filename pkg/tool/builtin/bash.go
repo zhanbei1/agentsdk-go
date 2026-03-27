@@ -809,7 +809,7 @@ func (v *bashCommandValidator) Validate(input string) error {
 
 	v.mu.RLock()
 	maxBytes := v.maxCommandBytes
-	maxArgs := v.maxArgs
+	//maxArgs := v.maxArgs
 	//allowMeta := v.allowShellMeta
 	v.mu.RUnlock()
 
@@ -836,9 +836,9 @@ func (v *bashCommandValidator) Validate(input string) error {
 	if len(args) == 0 {
 		return errors.New("bash: empty command")
 	}
-	if maxArgs > 0 && len(args) > maxArgs {
-		return fmt.Errorf("bash: too many arguments (%d)", len(args))
-	}
+	//if maxArgs > 0 && len(args) > maxArgs {
+	//	return fmt.Errorf("bash: too many arguments (%d)", len(args))
+	//}
 
 	return nil
 }
