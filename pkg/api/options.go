@@ -14,6 +14,7 @@ import (
 
 	"github.com/stellarlinkco/agentsdk-go/pkg/config"
 	hooks "github.com/stellarlinkco/agentsdk-go/pkg/hooks"
+	"github.com/stellarlinkco/agentsdk-go/pkg/message"
 	"github.com/stellarlinkco/agentsdk-go/pkg/middleware"
 	"github.com/stellarlinkco/agentsdk-go/pkg/model"
 	"github.com/stellarlinkco/agentsdk-go/pkg/runtime/skills"
@@ -107,17 +108,30 @@ type Options struct {
 	SystemPrompt string
 	RulesEnabled *bool // nil = 默认启用，false = 禁用
 
-	Middleware          []middleware.Middleware
-	MiddlewareTimeout   time.Duration
-	MaxIterations       int
-	Timeout             time.Duration
-	TokenLimit          int
-	MaxSessions         int
-	Tools               []tool.Tool
-	EnabledBuiltinTools []string
-	DisallowedTools     []string
-	CustomTools         []tool.Tool
-	MCPServers          []string
+	Middleware        []middleware.Middleware
+	MiddlewareTimeout time.Duration
+	MaxIterations     int
+	Timeout           time.Duration
+	TokenLimit        int
+	MaxSessions       int
+	// SessionHistoryLoader loads persisted messages the first time a session ID is
+	// used in this process. nil keeps the previous behaviour (empty in-memory history).
+	SessionHistoryLoader SessionHistoryLoader
+	// SessionHistoryMaxMessages, if > 0, keeps only the last N messages after load
+	// (after optional role filter). 0 means no truncation.
+	SessionHistoryMaxMessages int
+	// SessionHistoryRoles, if non-empty, keeps only messages whose Role matches one
+	// entry (case-insensitive). Empty means all roles. Narrowing to assistant-only
+	// drops user questions and usually hurts multi-turn quality; prefer leaving
+	// this nil and using SessionHistoryMaxMessages, or SessionHistoryTransform.
+	SessionHistoryRoles []string
+	// SessionHistoryTransform runs after load + built-in policy; use for custom ranking.
+	SessionHistoryTransform SessionHistoryTransform
+	Tools                   []tool.Tool
+	EnabledBuiltinTools     []string
+	DisallowedTools         []string
+	CustomTools             []tool.Tool
+	MCPServers              []string
 
 	TypedHooks        []hooks.ShellHook
 	HookMiddleware    []hooks.Middleware
@@ -140,6 +154,12 @@ type Options struct {
 	subMgr                   *subagents.Manager
 	tracer                   Tracer
 }
+
+// SessionHistoryLoader loads messages for a session from application storage.
+type SessionHistoryLoader func(sessionID string) ([]message.Message, error)
+
+// SessionHistoryTransform post-processes loaded messages before they enter History.
+type SessionHistoryTransform func(sessionID string, msgs []message.Message) []message.Message
 
 func DefaultSubagentDefinitions() []subagents.Definition {
 	return subagents.BuiltinDefinitions()
@@ -337,6 +357,10 @@ func (o Options) frozen() Options {
 	}
 	if len(o.SubagentModelMapping) > 0 {
 		o.SubagentModelMapping = maps.Clone(o.SubagentModelMapping)
+	}
+
+	if len(o.SessionHistoryRoles) > 0 {
+		o.SessionHistoryRoles = append([]string(nil), o.SessionHistoryRoles...)
 	}
 
 	return o

@@ -29,7 +29,7 @@ func newFileSandboxWithSandbox(root string, policy sandbox.FileSystemPolicy) *fi
 	return &fileSandbox{
 		policy:   policy,
 		root:     resolveRoot(root),
-		maxBytes: defaultMaxFileBytes,
+		maxBytes: 0, // unlimited
 	}
 }
 

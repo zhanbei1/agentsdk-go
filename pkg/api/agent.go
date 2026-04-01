@@ -172,6 +172,9 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	opts.tracer = tracer
 
 	histories := newHistoryStore(opts.MaxSessions)
+	if lh := sessionHistoryLoaderFromOptions(opts); lh != nil {
+		histories.loader = lh
+	}
 
 	rt := &Runtime{
 		opts:            opts,
