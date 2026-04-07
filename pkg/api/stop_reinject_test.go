@@ -23,11 +23,17 @@ func TestRunLoopReinjectsStopHookBlockingErrorAndContinues(t *testing.T) {
 			"count=$((count+1))\n"+
 			"printf '%s' \"$count\" > '"+countFile+"'\n"+
 			"if [ \"$count\" -le 2 ]; then printf '{\"decision\":\"block\",\"reason\":\"missing fix\"}'; else printf '{}'; fi\n",
-		"@set file="+countFile+"\r\n"+
+		"@setlocal EnableExtensions\r\n"+
+			"@set file="+countFile+"\r\n"+
 			"@if exist \"%file%\" (set /p count=<\"%file%\") else (set count=0)\r\n"+
 			"@set /a count=%count%+1\r\n"+
-			"@echo %count%>\"%file%\"\r\n"+
-			"@if %count% LEQ 2 (echo {\"decision\":\"block\",\"reason\":\"missing fix\"}) else (echo {})\r\n",
+			"@>\"%file%\" <nul set /p =%count%\r\n"+
+			"@if %count% LEQ 2 goto block\r\n"+
+			"@echo {}\r\n"+
+			"@goto end\r\n"+
+			":block\r\n"+
+			"@echo {\"decision\":\"block\",\"reason\":\"missing fix\"}\r\n"+
+			":end\r\n",
 	))
 
 	hookExec := hooks.NewExecutor()
