@@ -24,6 +24,7 @@ type preparedRun struct {
 	normalized     Request
 	recorder       *hookRecorder
 	skillResults   []SkillExecution
+	teamResult     *subagents.TeamResult
 	subagentResult *subagents.Result
 	mode           ModeContext
 	toolWhitelist  map[string]struct{}
@@ -61,6 +62,12 @@ func (rt *Runtime) prepare(ctx context.Context, req Request) (preparedRun, error
 	}
 	prompt = promptAfterSkills
 	activation.Prompt = prompt
+	teamRes, promptAfterCollaborators, err := rt.executeCollaborators(ctx, prompt, activation, &normalized)
+	if err != nil {
+		return preparedRun{}, err
+	}
+	prompt = promptAfterCollaborators
+	activation.Prompt = prompt
 	subRes, promptAfterSubagent, err := rt.executeSubagent(ctx, prompt, activation, &normalized)
 	if err != nil {
 		return preparedRun{}, err
@@ -76,6 +83,7 @@ func (rt *Runtime) prepare(ctx context.Context, req Request) (preparedRun, error
 		normalized:     normalized,
 		recorder:       recorder,
 		skillResults:   skillRes,
+		teamResult:     teamRes,
 		subagentResult: subRes,
 		mode:           normalized.Mode,
 		toolWhitelist:  whitelist,
@@ -324,6 +332,7 @@ func (rt *Runtime) buildResponse(prep preparedRun, result runResult) *Response {
 		RequestID:       prep.normalized.RequestID,
 		Result:          convertRunResult(result),
 		SkillResults:    prep.skillResults,
+		Team:            prep.teamResult,
 		Subagent:        prep.subagentResult,
 		HookEvents:      events,
 		ProjectConfig:   rt.Settings(),
@@ -420,8 +429,51 @@ func (rt *Runtime) executeSkills(ctx context.Context, prompt string, activation 
 	return execs, prompt, nil
 }
 
+func (rt *Runtime) executeCollaborators(ctx context.Context, prompt string, activation skills.ActivationContext, req *Request) (*subagents.TeamResult, string, error) {
+	if req == nil || rt.opts.subMgr == nil {
+		return nil, prompt, nil
+	}
+	meta := map[string]any{
+		"entrypoint": req.Mode.EntryPoint,
+	}
+	if len(req.Metadata) > 0 {
+		for k, v := range req.Metadata {
+			meta[k] = v
+		}
+	}
+	if session := strings.TrimSpace(req.SessionID); session != "" {
+		meta["session_id"] = session
+	}
+	dispatchCtx := ctx
+	if dispatchCtx == nil {
+		dispatchCtx = context.Background()
+	}
+	switch {
+	case len(req.TeamMembers) > 0 || req.TeamMaxAgents > 0:
+		res, err := rt.opts.subMgr.DispatchTeam(dispatchCtx, subagents.TeamRequest{
+			Instruction:    prompt,
+			Members:        cloneTeamMembers(req.TeamMembers),
+			Activation:     activation,
+			Metadata:       meta,
+			ToolWhitelist:  cloneStrings(req.ToolWhitelist),
+			MaxAgents:      req.TeamMaxAgents,
+			MaxConcurrency: req.TeamMaxConcurrency,
+		})
+		if err != nil {
+			return nil, "", err
+		}
+		prompt = combineCollaboratorPrompt(prompt, res.Members)
+		return &res, prompt, nil
+	default:
+		return nil, prompt, nil
+	}
+}
+
 func (rt *Runtime) executeSubagent(ctx context.Context, prompt string, activation skills.ActivationContext, req *Request) (*subagents.Result, string, error) {
 	if req == nil {
+		return nil, prompt, nil
+	}
+	if len(req.TeamMembers) > 0 || req.TeamMaxAgents > 0 {
 		return nil, prompt, nil
 	}
 

@@ -155,6 +155,39 @@ func combinePrompt(current string, output any) string {
 	return current + "\n" + strings.TrimSpace(text)
 }
 
+func combineCollaboratorPrompt(current string, statuses []subagents.Status) string {
+	if len(statuses) == 0 {
+		return current
+	}
+	for _, status := range statuses {
+		current = combinePrompt(current, formatCollaboratorStatus(status))
+	}
+	return current
+}
+
+func formatCollaboratorStatus(status subagents.Status) string {
+	var b strings.Builder
+	b.WriteString("[Collaborator: ")
+	b.WriteString(strings.TrimSpace(status.Name))
+	b.WriteString("]\nTask: ")
+	b.WriteString(strings.TrimSpace(status.Instruction))
+	b.WriteString("\nStatus: ")
+	if status.State == subagents.StatusError {
+		b.WriteString("error")
+	} else {
+		b.WriteString("success")
+	}
+	if text := strings.TrimSpace(status.Output); text != "" {
+		b.WriteString("\nOutput: ")
+		b.WriteString(text)
+	}
+	if text := strings.TrimSpace(status.Error); text != "" {
+		b.WriteString("\nError: ")
+		b.WriteString(text)
+	}
+	return b.String()
+}
+
 func prependPrompt(prompt, prefix string) string {
 	if strings.TrimSpace(prefix) == "" {
 		return prompt

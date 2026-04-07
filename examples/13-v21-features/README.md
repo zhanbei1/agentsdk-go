@@ -13,6 +13,7 @@ Demonstrates all v2.1 Agent Execution Contract features in a single runnable exa
 | Subagent Async Dispatch | `-feature subagent_async` | Background subagent execution with task status query |
 | SystemPromptBuilder | `-feature prompt_builder` | Priority-ordered section assembly with add/remove/clone |
 | Deferred Tools | `-feature deferred` | Tools excluded from initial request until activated via ToolSearch |
+| Teams | `-feature teams` | Team fanout with explicit members and automatic team selection via matcher-based auto-selection |
 
 ## Usage
 
@@ -28,6 +29,7 @@ go run ./examples/13-v21-features -feature output_limit -max-tool-output 100
 go run ./examples/13-v21-features -feature subagent_async
 go run ./examples/13-v21-features -feature prompt_builder
 go run ./examples/13-v21-features -feature deferred
+go run ./examples/13-v21-features -feature teams
 
 # Common options
 -session-id string   session identifier (default "v21-demo")

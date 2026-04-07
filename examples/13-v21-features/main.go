@@ -14,6 +14,7 @@ import (
 
 	"github.com/stellarlinkco/agentsdk-go/pkg/api"
 	"github.com/stellarlinkco/agentsdk-go/pkg/model"
+	"github.com/stellarlinkco/agentsdk-go/pkg/runtime/skills"
 	"github.com/stellarlinkco/agentsdk-go/pkg/runtime/subagents"
 	"github.com/stellarlinkco/agentsdk-go/pkg/tool"
 )
@@ -44,7 +45,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		concurrency int
 		maxIters    int
 	)
-	fs.StringVar(&feature, "feature", "", "run a specific feature demo: token_budget|micro_compact|tool_concurrency|output_limit|subagent_async|prompt_builder|deferred|all")
+	fs.StringVar(&feature, "feature", "", "run a specific feature demo: token_budget|micro_compact|tool_concurrency|output_limit|subagent_async|prompt_builder|deferred|teams|all")
 	fs.StringVar(&sessionID, "session-id", "v21-demo", "session identifier")
 	fs.BoolVar(&showAll, "all", false, "run all feature demos sequentially")
 	fs.IntVar(&tokenBudget, "token-budget", 0, "set token budget limit (0=disabled)")
@@ -58,12 +59,13 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 
 	if feature == "" && !showAll {
 		fs.Usage()
-		fmt.Fprintln(out, "\nFeatures: token_budget | micro_compact | tool_concurrency | output_limit | subagent_async | prompt_builder | deferred")
+		fmt.Fprintln(out, "\nFeatures: token_budget | micro_compact | tool_concurrency | output_limit | subagent_async | prompt_builder | deferred | teams")
 		fmt.Fprintln(out, "\nExamples:")
 		fmt.Fprintln(out, "  go run ./examples/13-v21-features -all")
 		fmt.Fprintln(out, "  go run ./examples/13-v21-features -feature token_budget -token-budget 5000")
 		fmt.Fprintln(out, "  go run ./examples/13-v21-features -feature subagent_async")
 		fmt.Fprintln(out, "  go run ./examples/13-v21-features -feature prompt_builder")
+		fmt.Fprintln(out, "  go run ./examples/13-v21-features -feature teams")
 		return nil
 	}
 
@@ -96,6 +98,7 @@ func runAllFeatures(ctx context.Context, cfg runtimeConfig) error {
 		"output_limit",
 		"subagent_async",
 		"deferred",
+		"teams",
 	}
 	for _, f := range features {
 		cfg.feature = f
@@ -125,6 +128,8 @@ func runFeature(ctx context.Context, cfg runtimeConfig) error {
 		return demoPromptBuilder(ctx, cfg)
 	case "deferred":
 		return demoDeferredTools(ctx, cfg)
+	case "teams":
+		return demoTeams(ctx, cfg)
 	default:
 		return fmt.Errorf("unknown feature: %s", cfg.feature)
 	}
@@ -151,11 +156,11 @@ type runtimeConfig struct {
 func demoTokenBudget(ctx context.Context, cfg runtimeConfig) error {
 	mdl := &diminishingModel{turns: 5}
 	opts := api.Options{
-		EntryPoint:       api.EntryPointCLI,
-		ProjectRoot:      ".",
-		Model:            mdl,
-		MaxIterations:    20,
-		TokenLimit:       4096,
+		EntryPoint:        api.EntryPointCLI,
+		ProjectRoot:       ".",
+		Model:             mdl,
+		MaxIterations:     20,
+		TokenLimit:        4096,
 		DisableSafetyHook: true,
 		TokenBudget: api.TokenBudgetConfig{
 			MaxTokens:            100000,
@@ -236,16 +241,16 @@ func (m *diminishingModel) CompleteStream(_ context.Context, _ model.Request, cb
 func demoMicroCompact(ctx context.Context, cfg runtimeConfig) error {
 	mdl := &microCompactModel{stopAt: 6}
 	opts := api.Options{
-		EntryPoint:  api.EntryPointCLI,
-		ProjectRoot: ".",
-		Model:       mdl,
-		MaxIterations: 20,
-		TokenLimit:   4096,
+		EntryPoint:        api.EntryPointCLI,
+		ProjectRoot:       ".",
+		Model:             mdl,
+		MaxIterations:     20,
+		TokenLimit:        4096,
 		DisableSafetyHook: true,
 		AutoCompact: api.CompactConfig{
-			Enabled:           true,
-			Threshold:         0.5,
-			PreserveCount:     2,
+			Enabled:            true,
+			Threshold:          0.5,
+			PreserveCount:      2,
 			MicroPreserveCount: 2,
 		},
 		Tools: []tool.Tool{&noopTool{name: "bash"}},
@@ -322,13 +327,13 @@ func demoToolConcurrency(ctx context.Context, cfg runtimeConfig) error {
 		conc = 4
 	}
 	opts := api.Options{
-		EntryPoint:       api.EntryPointCLI,
-		ProjectRoot:      ".",
-		Model:            mdl,
-		MaxIterations:    20,
-		TokenLimit:       4096,
+		EntryPoint:        api.EntryPointCLI,
+		ProjectRoot:       ".",
+		Model:             mdl,
+		MaxIterations:     20,
+		TokenLimit:        4096,
 		DisableSafetyHook: true,
-		ToolConcurrency:  conc,
+		ToolConcurrency:   conc,
 		Tools: []tool.Tool{
 			&slowReadTool{name: "read", latency: 100 * time.Millisecond},
 			&slowReadTool{name: "glob", latency: 100 * time.Millisecond},
@@ -360,10 +365,10 @@ func demoToolConcurrency(ctx context.Context, cfg runtimeConfig) error {
 }
 
 type concurrencyModel struct {
-	mu        sync.Mutex
-	turn      int
-	turns     int
-	finishAt  int
+	mu       sync.Mutex
+	turn     int
+	turns    int
+	finishAt int
 }
 
 func (m *concurrencyModel) Complete(_ context.Context, _ model.Request) (*model.Response, error) {
@@ -422,7 +427,7 @@ func demoOutputLimit(ctx context.Context, cfg runtimeConfig) error {
 		Model:             mdl,
 		MaxIterations:     10,
 		TokenLimit:        4096,
-		DisableSafetyHook:  true,
+		DisableSafetyHook: true,
 		MaxToolOutputSize: limit,
 		Tools: []tool.Tool{
 			&largeOutputTool{size: toolSize},
@@ -547,6 +552,84 @@ func demoSubagentAsync(ctx context.Context, cfg runtimeConfig) error {
 	return nil
 }
 
+func demoTeams(ctx context.Context, cfg runtimeConfig) error {
+	mdl := &stubDemoModel{content: "main ok"}
+	matcher := skills.MatcherFunc(func(ctx skills.ActivationContext) skills.MatchResult {
+		return skills.MatchResult{Matched: true, Score: 1}
+	})
+	handler := func(name string) subagents.HandlerFunc {
+		return func(ctx context.Context, subCtx subagents.Context, req subagents.Request) (subagents.Result, error) {
+			return subagents.Result{Output: name + ":" + req.Instruction}, nil
+		}
+	}
+	rt, err := api.New(ctx, api.Options{
+		EntryPoint:        api.EntryPointCLI,
+		ProjectRoot:       ".",
+		Model:             mdl,
+		DisableSafetyHook: true,
+		Subagents: []api.SubagentRegistration{
+			{
+				Definition: subagents.Definition{Name: "alpha", Description: "alpha", Matchers: []skills.Matcher{matcher}},
+				Handler:    handler("alpha"),
+			},
+			{
+				Definition: subagents.Definition{Name: "beta", Description: "beta", Matchers: []skills.Matcher{matcher}},
+				Handler:    handler("beta"),
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("build runtime: %w", err)
+	}
+	defer rt.Close()
+
+	teamResp, err := rt.Run(ctx, api.Request{
+		Prompt: "inspect",
+		TeamMembers: []subagents.TeamMember{
+			{Name: "alpha", Instruction: "scan-a"},
+			{Name: "beta", Instruction: "scan-b"},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("run team: %w", err)
+	}
+	if teamResp.Team == nil || len(teamResp.Team.Members) != 2 {
+		return fmt.Errorf("unexpected team response: %+v", teamResp.Team)
+	}
+	fmt.Fprintf(cfg.out, "  team members=%d\n", len(teamResp.Team.Members))
+
+	autoTeamResp, err := rt.Run(ctx, api.Request{
+		Prompt:        "inspect",
+		TeamMaxAgents: 1,
+	})
+	if err != nil {
+		return fmt.Errorf("run auto team: %w", err)
+	}
+	if autoTeamResp.Team == nil || len(autoTeamResp.Team.Members) != 1 {
+		return fmt.Errorf("unexpected auto team response: %+v", autoTeamResp.Team)
+	}
+	fmt.Fprintf(cfg.out, "  auto team members=%d\n", len(autoTeamResp.Team.Members))
+	fmt.Fprintf(cfg.out, "  teams demo: OK\n")
+	return nil
+}
+
+type stubDemoModel struct{ content string }
+
+func (m *stubDemoModel) Complete(_ context.Context, _ model.Request) (*model.Response, error) {
+	return &model.Response{Message: model.Message{Role: "assistant", Content: m.content}, StopReason: "stop"}, nil
+}
+
+func (m *stubDemoModel) CompleteStream(_ context.Context, req model.Request, cb model.StreamHandler) error {
+	resp, err := m.Complete(context.Background(), req)
+	if err != nil {
+		return err
+	}
+	if cb != nil {
+		return cb(model.StreamResult{Final: true, Response: resp})
+	}
+	return nil
+}
+
 type echoSubagentHandler struct{}
 
 func (h *echoSubagentHandler) Handle(_ context.Context, _ subagents.Context, req subagents.Request) (subagents.Result, error) {
@@ -650,11 +733,11 @@ func demoPromptBuilder(ctx context.Context, cfg runtimeConfig) error {
 func demoDeferredTools(ctx context.Context, cfg runtimeConfig) error {
 	mdl := &deferredToolsModel{}
 	opts := api.Options{
-		EntryPoint:       api.EntryPointCLI,
-		ProjectRoot:      ".",
-		Model:            mdl,
-		MaxIterations:    10,
-		TokenLimit:       4096,
+		EntryPoint:        api.EntryPointCLI,
+		ProjectRoot:       ".",
+		Model:             mdl,
+		MaxIterations:     10,
+		TokenLimit:        4096,
 		DisableSafetyHook: true,
 		Tools: []tool.Tool{
 			&deferredReadTool{name: "deferred_read", deferred: true},
@@ -706,8 +789,8 @@ func (m *deferredToolsModel) CompleteStream(_ context.Context, _ model.Request, 
 
 type noopTool struct{ name string }
 
-func (t *noopTool) Name() string            { return t.name }
-func (t *noopTool) Description() string     { return "noop tool" }
+func (t *noopTool) Name() string             { return t.name }
+func (t *noopTool) Description() string      { return "noop tool" }
 func (t *noopTool) Schema() *tool.JSONSchema { return nil }
 func (t *noopTool) Execute(_ context.Context, _ map[string]any) (*tool.ToolResult, error) {
 	return &tool.ToolResult{Success: true, Output: "ok"}, nil
@@ -718,8 +801,8 @@ type slowReadTool struct {
 	latency time.Duration
 }
 
-func (t *slowReadTool) Name() string            { return t.name }
-func (t *slowReadTool) Description() string     { return "slow " + t.name }
+func (t *slowReadTool) Name() string        { return t.name }
+func (t *slowReadTool) Description() string { return "slow " + t.name }
 func (t *slowReadTool) Schema() *tool.JSONSchema {
 	return &tool.JSONSchema{Type: "object", Properties: map[string]any{}}
 }
@@ -755,12 +838,12 @@ func (t *largeOutputTool) Execute(_ context.Context, _ map[string]any) (*tool.To
 }
 
 type deferredReadTool struct {
-	name      string
-	deferred  bool
+	name     string
+	deferred bool
 }
 
-func (t *deferredReadTool) Name() string            { return t.name }
-func (t *deferredReadTool) Description() string     { return "deferred " + t.name }
+func (t *deferredReadTool) Name() string        { return t.name }
+func (t *deferredReadTool) Description() string { return "deferred " + t.name }
 func (t *deferredReadTool) Schema() *tool.JSONSchema {
 	return &tool.JSONSchema{Type: "object", Properties: map[string]any{}}
 }
@@ -771,8 +854,8 @@ func (t *deferredReadTool) ShouldDefer() bool { return t.deferred }
 
 type normalTool struct{ name string }
 
-func (t *normalTool) Name() string            { return t.name }
-func (t *normalTool) Description() string     { return "normal tool" }
+func (t *normalTool) Name() string        { return t.name }
+func (t *normalTool) Description() string { return "normal tool" }
 func (t *normalTool) Schema() *tool.JSONSchema {
 	return &tool.JSONSchema{Type: "object", Properties: map[string]any{}}
 }
