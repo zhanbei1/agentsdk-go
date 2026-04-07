@@ -12,15 +12,17 @@ import (
 
 // CompactConfig controls automatic context compaction.
 type CompactConfig struct {
-	Enabled       bool    `json:"enabled"`
-	Threshold     float64 `json:"threshold"`      // trigger ratio (default 0.8)
-	PreserveCount int     `json:"preserve_count"` // keep latest N messages (default 5)
+	Enabled            bool    `json:"enabled"`
+	Threshold          float64 `json:"threshold"`            // trigger ratio (default 0.8)
+	PreserveCount      int     `json:"preserve_count"`       // keep latest N messages (default 5)
+	MicroPreserveCount int     `json:"micro_preserve_count"` // keep latest N messages intact for micro-compaction; zero disables
 }
 
 const (
 	defaultCompactThreshold   = 0.8
 	defaultCompactPreserve    = 5
 	defaultClaudeContextLimit = 200000
+	defaultMicroTriggerBuffer = 4
 )
 
 func (c CompactConfig) withDefaults() CompactConfig {
@@ -76,10 +78,11 @@ func (c *compactor) maybeCompact(ctx context.Context, hist *message.History, mdl
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	didMicroCompact := c.maybeMicroCompact(hist)
 	msgCount := hist.Len()
 	tokenCount := hist.TokenCount()
 	if !c.shouldCompact(msgCount, tokenCount) {
-		return false, nil
+		return didMicroCompact, nil
 	}
 	if mdl == nil {
 		return false, errors.New("api: compaction enabled but model is nil")

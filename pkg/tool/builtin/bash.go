@@ -148,6 +148,10 @@ func (b *BashTool) Description() string {
 
 func (b *BashTool) Schema() *tool.JSONSchema { return bashSchema }
 
+func (b *BashTool) Metadata() tool.Metadata {
+	return tool.Metadata{IsDestructive: true}
+}
+
 func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (*tool.ToolResult, error) {
 	if ctx == nil {
 		return nil, errors.New("context is nil")

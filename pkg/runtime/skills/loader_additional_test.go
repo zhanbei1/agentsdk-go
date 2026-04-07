@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 )
 
@@ -26,12 +27,95 @@ func TestValidateMetadataErrors(t *testing.T) {
 		{Name: "Bad!", Description: "d"},
 		{Name: "ok", Description: ""},
 		{Name: "ok", Description: strings.Repeat("x", 1025)},
+		{Name: "ok", Description: "d", WhenToUse: strings.Repeat("x", 513)},
 	}
 
 	for i, meta := range cases {
 		if err := validateMetadata(meta); err == nil {
 			t.Fatalf("case %d: expected error", i)
 		}
+	}
+}
+
+func TestLoadFromFSRecursivePathsAndWhenToUse(t *testing.T) {
+	root := t.TempDir()
+	skillPath := filepath.Join(root, ".agents", "skills", "group", "go-skill", "SKILL.md")
+	content := strings.Join([]string{
+		"---",
+		"name: go-skill",
+		"description: generic desc",
+		"when_to_use: use this for go files",
+		"paths:",
+		"  - '*.go'",
+		"  - 'pkg/**/*.go'",
+		"---",
+		"body",
+		"",
+	}, "\n")
+	mustWrite(t, skillPath, content)
+
+	regs, errs := LoadFromFS(LoaderOptions{ProjectRoot: root})
+	if len(errs) != 0 || len(regs) != 1 {
+		t.Fatalf("unexpected load result regs=%v errs=%v", regs, errs)
+	}
+	def := regs[0].Definition
+	if def.Description != "use this for go files" {
+		t.Fatalf("expected when_to_use to override description, got %q", def.Description)
+	}
+	if def.Metadata["when_to_use"] != "use this for go files" {
+		t.Fatalf("missing when_to_use metadata: %+v", def.Metadata)
+	}
+	match := NewRegistry()
+	if err := match.Register(def, regs[0].Handler); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	got := match.Match(ActivationContext{CurrentPaths: []string{"pkg/api/agent.go"}})
+	if len(got) != 1 || got[0].Definition().Name != "go-skill" {
+		t.Fatalf("expected path-based activation, got %+v", got)
+	}
+}
+
+func TestLoadFromFSEmbedSkillsProjectWins(t *testing.T) {
+	root := t.TempDir()
+	projectShared := filepath.Join(root, ".agents", "skills", "shared", "SKILL.md")
+	writeSkill(t, projectShared, "shared", "project body")
+
+	embed := fstest.MapFS{
+		".agents/skills/embed-only/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: embed-only\ndescription: desc\n---\nembed only\n")},
+		".agents/skills/shared/SKILL.md":     &fstest.MapFile{Data: []byte("---\nname: shared\ndescription: desc\n---\nembed body\n")},
+	}
+
+	regs, errs := LoadFromFS(LoaderOptions{ProjectRoot: root, EmbedFS: embed})
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "duplicate skill") {
+		t.Fatalf("expected duplicate warning, got %v", errs)
+	}
+	if len(regs) != 2 {
+		t.Fatalf("expected 2 regs, got %d", len(regs))
+	}
+
+	reg := NewRegistry()
+	for _, entry := range regs {
+		if err := reg.Register(entry.Definition, entry.Handler); err != nil {
+			t.Fatalf("register %s: %v", entry.Definition.Name, err)
+		}
+	}
+
+	shared, err := reg.Execute(context.Background(), "shared", ActivationContext{})
+	if err != nil {
+		t.Fatalf("execute shared: %v", err)
+	}
+	sharedOut := shared.Output.(map[string]any)
+	if sharedOut["body"] != "project body" {
+		t.Fatalf("expected project override, got %v", sharedOut["body"])
+	}
+
+	embedOnly, err := reg.Execute(context.Background(), "embed-only", ActivationContext{})
+	if err != nil {
+		t.Fatalf("execute embed-only: %v", err)
+	}
+	embedOnlyOut := embedOnly.Output.(map[string]any)
+	if strings.TrimSpace(embedOnlyOut["body"].(string)) != "embed only" {
+		t.Fatalf("expected embed skill body, got %v", embedOnlyOut["body"])
 	}
 }
 

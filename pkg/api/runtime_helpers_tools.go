@@ -15,7 +15,7 @@ func (rt *Runtime) AvailableTools() []model.ToolDefinition {
 	if rt == nil {
 		return nil
 	}
-	return availableTools(rt.registry, nil)
+	return availableToolsForSession(rt.registry, nil, rt.deferred, "")
 }
 
 // AvailableToolsForWhitelist returns model-facing tool definitions constrained by whitelist.
@@ -23,5 +23,23 @@ func (rt *Runtime) AvailableToolsForWhitelist(toolWhitelist []string) []model.To
 	if rt == nil {
 		return nil
 	}
-	return availableTools(rt.registry, toLowerSet(toolWhitelist))
+	return availableToolsForSession(rt.registry, toLowerSet(toolWhitelist), rt.deferred, "")
+}
+
+func (rt *Runtime) systemPromptForSession(sessionID string, whitelist map[string]struct{}) string {
+	if rt == nil {
+		return ""
+	}
+	base := rt.opts.SystemPrompt
+	if rt.deferred == nil {
+		return base
+	}
+	section := deferredToolSection(rt.deferred.inactiveNames(sessionID, whitelist))
+	if section == "" {
+		return base
+	}
+	if base == "" {
+		return section
+	}
+	return base + "\n\n" + section
 }

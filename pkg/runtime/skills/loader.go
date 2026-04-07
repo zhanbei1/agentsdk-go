@@ -58,6 +58,7 @@ type LoaderOptions struct {
 	UserHome    string
 	EnableUser  bool
 	FS          *config.FS
+	EmbedFS     fs.FS
 }
 
 type SkillFile struct {
@@ -121,10 +122,12 @@ func (t *ToolList) UnmarshalYAML(value *yaml.Node) error {
 type SkillMetadata struct {
 	Name          string            `yaml:"name"`
 	Description   string            `yaml:"description"`
+	WhenToUse     string            `yaml:"when_to_use,omitempty"`
 	License       string            `yaml:"license,omitempty"`
 	Compatibility string            `yaml:"compatibility,omitempty"`
 	Metadata      map[string]string `yaml:"metadata,omitempty"`
 	AllowedTools  ToolList          `yaml:"allowed-tools,omitempty"`
+	Paths         []string          `yaml:"paths,omitempty"`
 }
 
 type SkillRegistration struct {
@@ -150,28 +153,30 @@ func LoadFromFS(opts LoaderOptions) ([]SkillRegistration, []error) {
 		allFiles      []SkillFile
 	)
 
-	fsLayer := opts.FS
-	if fsLayer == nil {
-		fsLayer = config.NewFS(opts.ProjectRoot, nil)
+	projectFS := opts.FS
+	if projectFS == nil {
+		projectFS = config.NewFS(opts.ProjectRoot, nil)
+	}
+	mergedFS := projectFS
+	if opts.EmbedFS != nil {
+		mergedFS = config.NewFS(opts.ProjectRoot, opts.EmbedFS)
 	}
 
-	ops := resolveFileOps(opts.FS)
+	ops := resolveFileOps(mergedFS)
 
 	agentsDir := filepath.Join(opts.ProjectRoot, ".agents", "skills")
-	files, loadErrs := loadSkillDirFn(agentsDir, fsLayer)
+	files, loadErrs := loadSkillDirFn(agentsDir, projectFS)
 	errs = append(errs, loadErrs...)
 	allFiles = append(allFiles, files...)
+	if opts.EmbedFS != nil {
+		embedFiles, embedErrs := loadEmbeddedSkillDir(opts.ProjectRoot, opts.EmbedFS)
+		errs = append(errs, embedErrs...)
+		allFiles = append(allFiles, embedFiles...)
+	}
 
 	if len(allFiles) == 0 {
 		return nil, errs
 	}
-
-	sort.Slice(allFiles, func(i, j int) bool {
-		if allFiles[i].Metadata.Name != allFiles[j].Metadata.Name {
-			return allFiles[i].Metadata.Name < allFiles[j].Metadata.Name
-		}
-		return allFiles[i].Path < allFiles[j].Path
-	})
 
 	seen := map[string]string{}
 	for _, file := range allFiles {
@@ -183,8 +188,11 @@ func LoadFromFS(opts LoaderOptions) ([]SkillRegistration, []error) {
 
 		def := Definition{
 			Name:        file.Metadata.Name,
-			Description: file.Metadata.Description,
+			Description: skillDisplayDescription(file.Metadata),
 			Metadata:    buildDefinitionMetadata(file),
+		}
+		if len(file.Metadata.Paths) > 0 {
+			def.Matchers = append(def.Matchers, PathMatcher{Patterns: append([]string(nil), file.Metadata.Paths...)})
 		}
 		reg := SkillRegistration{
 			Definition: def,
@@ -192,6 +200,9 @@ func LoadFromFS(opts LoaderOptions) ([]SkillRegistration, []error) {
 		}
 		registrations = append(registrations, reg)
 	}
+	sort.Slice(registrations, func(i, j int) bool {
+		return registrations[i].Definition.Name < registrations[j].Definition.Name
+	})
 
 	return registrations, errs
 }
@@ -218,30 +229,85 @@ func loadSkillDir(root string, fsLayer *config.FS) ([]SkillFile, []error) {
 	if !info.IsDir() {
 		return nil, []error{fmt.Errorf("skills: path %s is not a directory", root)}
 	}
-
-	entries, err := fsLayer.ReadDir(root)
-	if err != nil {
+	if _, err := fsLayer.ReadDir(root); err != nil {
 		return nil, []error{fmt.Errorf("skills: read dir %s: %w", root, err)}
 	}
 
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
+	if walkErr := fsLayer.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, fs.ErrNotExist) {
+				return fs.SkipDir
+			}
+			errs = append(errs, fmt.Errorf("skills: walk %s: %w", path, walkErr))
+			return nil
+		}
+		if d == nil || d.IsDir() || d.Name() != "SKILL.md" {
+			return nil
 		}
 
-		dirName := entry.Name()
-		path := filepath.Join(root, dirName, "SKILL.md")
+		dirName := filepath.Base(filepath.Dir(path))
 		file, parseErr := parseSkillFile(path, dirName, fsLayer)
 		if parseErr != nil {
 			if errors.Is(parseErr, fs.ErrNotExist) {
-				continue
+				return nil
 			}
 			errs = append(errs, parseErr)
-			continue
+			return nil
 		}
 
 		results = append(results, file)
+		return nil
+	}); walkErr != nil {
+		errs = append(errs, fmt.Errorf("skills: walk %s: %w", root, walkErr))
 	}
+	sort.Slice(results, func(i, j int) bool { return results[i].Path < results[j].Path })
+	return results, errs
+}
+
+func loadEmbeddedSkillDir(projectRoot string, embed fs.FS) ([]SkillFile, []error) {
+	var (
+		results []SkillFile
+		errs    []error
+	)
+	if embed == nil {
+		return nil, nil
+	}
+	const embedRoot = ".agents/skills"
+	if _, err := fs.Stat(embed, embedRoot); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, []error{fmt.Errorf("skills: stat %s: %w", embedRoot, err)}
+	}
+
+	fsLayer := config.NewFS(projectRoot, embed)
+	if err := fs.WalkDir(embed, embedRoot, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, fs.ErrNotExist) {
+				return fs.SkipDir
+			}
+			errs = append(errs, fmt.Errorf("skills: walk %s: %w", path, walkErr))
+			return nil
+		}
+		if d == nil || d.IsDir() || d.Name() != "SKILL.md" {
+			return nil
+		}
+		fullPath := filepath.Join(projectRoot, filepath.FromSlash(path))
+		dirName := filepath.Base(filepath.Dir(fullPath))
+		file, parseErr := parseSkillFile(fullPath, dirName, fsLayer)
+		if parseErr != nil {
+			if errors.Is(parseErr, fs.ErrNotExist) {
+				return nil
+			}
+			errs = append(errs, parseErr)
+			return nil
+		}
+		results = append(results, file)
+		return nil
+	}); err != nil {
+		errs = append(errs, fmt.Errorf("skills: walk %s: %w", embedRoot, err))
+	}
+	sort.Slice(results, func(i, j int) bool { return results[i].Path < results[j].Path })
 	return results, errs
 }
 
@@ -365,6 +431,9 @@ func validateMetadata(meta SkillMetadata) error {
 	if len(compat) > 500 {
 		return errors.New("compatibility exceeds 500 characters")
 	}
+	if when := strings.TrimSpace(meta.WhenToUse); len(when) > 512 {
+		return errors.New("when_to_use exceeds 512 characters")
+	}
 	return nil
 }
 
@@ -456,6 +525,18 @@ func buildDefinitionMetadata(file SkillFile) map[string]string {
 		}
 		meta["compatibility"] = compat
 	}
+	if when := strings.TrimSpace(file.Metadata.WhenToUse); when != "" {
+		if meta == nil {
+			meta = map[string]string{}
+		}
+		meta["when_to_use"] = when
+	}
+	if len(file.Metadata.Paths) > 0 {
+		if meta == nil {
+			meta = map[string]string{}
+		}
+		meta["paths"] = strings.Join(file.Metadata.Paths, ",")
+	}
 
 	if file.Path != "" {
 		if meta == nil {
@@ -465,6 +546,13 @@ func buildDefinitionMetadata(file SkillFile) map[string]string {
 	}
 
 	return meta
+}
+
+func skillDisplayDescription(meta SkillMetadata) string {
+	if when := strings.TrimSpace(meta.WhenToUse); when != "" {
+		return when
+	}
+	return strings.TrimSpace(meta.Description)
 }
 
 func resolveFileOps(fsLayer *config.FS) fileOps {

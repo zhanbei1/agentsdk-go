@@ -2,7 +2,7 @@
 
 # agentsdk-go 示例
 
-十二个示例，均可在仓库根目录运行。
+十三个示例，均可在仓库根目录运行。
 
 **环境配置**
 
@@ -35,6 +35,7 @@ export ANTHROPIC_API_KEY=sk-ant-your-key-here
 - `10-hooks`（~85 行）：Hooks 系统，PreToolUse/PostToolUse shell 钩子。
 - `11-reasoning`（~186 行）：推理模型支持（DeepSeek-R1 reasoning_content 透传）。
 - `12-multimodal`（~135 行）：多模态内容块（文本 + 图片）。
+- `13-v21-features`（~500 行）：v2.1 功能演示，涵盖 token budget、micro-compaction、tool concurrency、output limit、async subagent、SystemPromptBuilder、deferred tools。
 
 ## 01-basic — 最小入门
 - 目标：最快看到 SDK 核心循环，一次请求一次响应。
@@ -132,4 +133,14 @@ go run ./examples/11-reasoning
 ```bash
 source .env
 go run ./examples/12-multimodal
+```
+
+## 13-v21-features — v2.1 Feature Demo
+- 关键特性：无需 API key，使用 stub 模型验证所有 v2.1 功能：token budget、micro-compaction、tool concurrency、output limit、async subagent、SystemPromptBuilder、deferred tools。
+- 运行：
+```bash
+go run ./examples/13-v21-features -all
+go run ./examples/13-v21-features -feature token_budget
+go run ./examples/13-v21-features -feature subagent_async
+go run ./examples/13-v21-features -feature prompt_builder
 ```

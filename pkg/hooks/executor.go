@@ -463,6 +463,22 @@ func buildPayload(evt Event) ([]byte, error) {
 			envelope["transcript_path"] = p.TranscriptPath
 		}
 		envelope["stop_hook_active"] = p.StopHookActive
+	case SubagentCompletePayload:
+		if p.TaskID != "" {
+			envelope["task_id"] = p.TaskID
+		}
+		if p.Name != "" {
+			envelope["agent_name"] = p.Name
+		}
+		if p.Status != "" {
+			envelope["status"] = p.Status
+		}
+		if p.Output != "" {
+			envelope["output"] = p.Output
+		}
+		if p.Error != "" {
+			envelope["error"] = p.Error
+		}
 	case SessionStartPayload:
 		if p.SessionID != "" {
 			envelope["session_id"] = p.SessionID
@@ -492,6 +508,9 @@ func buildPayload(evt Event) ([]byte, error) {
 	case StopPayload:
 		if p.Reason != "" {
 			envelope["reason"] = p.Reason
+		}
+		if p.BlockingError != "" {
+			envelope["blocking_error"] = p.BlockingError
 		}
 		envelope["stop_hook_active"] = p.StopHookActive
 	case nil:
@@ -556,6 +575,10 @@ func extractMatcherTarget(eventType EventType, payload any) string {
 			}
 			return p.Name
 		}
+	case SubagentComplete:
+		if p, ok := payload.(SubagentCompletePayload); ok {
+			return p.Name
+		}
 	case Stop:
 		return ""
 	}
@@ -564,7 +587,7 @@ func extractMatcherTarget(eventType EventType, payload any) string {
 
 func validateEvent(t EventType) error {
 	switch t {
-	case PreToolUse, PostToolUse, SessionStart, SessionEnd, Stop, SubagentStart, SubagentStop:
+	case PreToolUse, PostToolUse, SessionStart, SessionEnd, Stop, SubagentStart, SubagentStop, SubagentComplete:
 		return nil
 	default:
 		return fmt.Errorf("hooks: unsupported event %s", t)

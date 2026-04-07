@@ -49,6 +49,7 @@ type Runtime struct {
 	hooks     *hooks.Executor
 	histories *historyStore
 	compactor *compactor
+	deferred  *deferredToolState
 
 	mu sync.RWMutex
 
@@ -72,14 +73,20 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		log.Printf("claude hooks materializer warning: %v", err)
 	}
 
+	builder := opts.SystemPromptBuilder
+	if builder == nil {
+		builder = NewSystemPromptBuilder()
+	} else {
+		builder = builder.Clone()
+	}
+	if text := strings.TrimSpace(opts.SystemPrompt); text != "" {
+		builder.AddSection(SystemPromptSectionIdentity, text, SystemPromptPriorityIdentity)
+	}
+
 	if memory, err := config.LoadAgentsMD(opts.ProjectRoot, fsLayer); err != nil {
 		log.Printf("agents.md loader warning: %v", err)
 	} else if strings.TrimSpace(memory) != "" {
-		if strings.TrimSpace(opts.SystemPrompt) == "" {
-			opts.SystemPrompt = fmt.Sprintf("## Memory\n\n%s", strings.TrimSpace(memory))
-		} else {
-			opts.SystemPrompt = fmt.Sprintf("%s\n\n## Memory\n\n%s", strings.TrimSpace(opts.SystemPrompt), strings.TrimSpace(memory))
-		}
+		builder.AddSection(SystemPromptSectionMemory, fmt.Sprintf("## Memory\n\n%s", strings.TrimSpace(memory)), SystemPromptPriorityMemory)
 	}
 
 	settings, err := loadSettings(opts)
@@ -116,7 +123,9 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	if err := registerMCPServers(ctx, registry, sbox, mcpServers); err != nil {
 		return nil, err
 	}
-	executor := tool.NewExecutor(registry, sbox).WithOutputPersister(tool.NewOutputPersister())
+	executor := tool.NewExecutor(registry, sbox).
+		WithOutputPersister(tool.NewOutputPersister()).
+		WithMaxOutputSize(opts.MaxToolOutputSize)
 
 	hooks := newHookExecutor(opts, settings)
 	compactor := newCompactor(opts.AutoCompact, opts.TokenLimit)
@@ -132,16 +141,14 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		if _, err := loader.LoadRules(); err != nil {
 			log.Printf("rules loader warning: %v", err)
 		} else if rules := strings.TrimSpace(loader.GetContent()); rules != "" {
-			if strings.TrimSpace(opts.SystemPrompt) == "" {
-				opts.SystemPrompt = fmt.Sprintf("## Project Rules\n\n%s", rules)
-			} else {
-				opts.SystemPrompt = fmt.Sprintf("%s\n\n## Project Rules\n\n%s", strings.TrimSpace(opts.SystemPrompt), rules)
-			}
+			builder.AddSection(SystemPromptSectionRules, fmt.Sprintf("## Project Rules\n\n%s", rules), SystemPromptPriorityRules)
 		}
 		if err := loader.Close(); err != nil {
 			log.Printf("rules loader close warning: %v", err)
 		}
 	}
+	opts.SystemPromptBuilder = builder
+	opts.SystemPrompt = builder.Build()
 
 	histories := newHistoryStore(opts.MaxSessions)
 
@@ -153,7 +160,9 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		hooks:     hooks,
 		histories: histories,
 		compactor: compactor,
+		deferred:  newDeferredToolState(registry),
 	}
+	rt.bindSubagentCallbacks()
 	return rt, nil
 }
 

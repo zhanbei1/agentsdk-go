@@ -4,15 +4,17 @@ import "testing"
 
 func TestActivationContextCloneIsolation(t *testing.T) {
 	ctx := ActivationContext{
-		Prompt:   "Hello world",
-		Channels: []string{"cli"},
-		Tags:     map[string]string{"k": "v"},
-		Traits:   []string{"dev"},
-		Metadata: map[string]any{"x": 1},
+		Prompt:       "Hello world",
+		Channels:     []string{"cli"},
+		CurrentPaths: []string{"main.go"},
+		Tags:         map[string]string{"k": "v"},
+		Traits:       []string{"dev"},
+		Metadata:     map[string]any{"x": 1},
 	}
 	cloned := ctx.Clone()
 	cloned.Prompt = "changed"
 	cloned.Channels[0] = "ui"
+	cloned.CurrentPaths[0] = "style.css"
 	cloned.Tags["k"] = "other"
 	cloned.Metadata["x"] = 2
 	cloned.Traits[0] = "ops"
@@ -21,7 +23,7 @@ func TestActivationContextCloneIsolation(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected int metadata, got %T", ctx.Metadata["x"])
 	}
-	if ctx.Prompt != "Hello world" || ctx.Channels[0] != "cli" || ctx.Tags["k"] != "v" || meta != 1 || ctx.Traits[0] != "dev" {
+	if ctx.Prompt != "Hello world" || ctx.Channels[0] != "cli" || ctx.CurrentPaths[0] != "main.go" || ctx.Tags["k"] != "v" || meta != 1 || ctx.Traits[0] != "dev" {
 		t.Fatalf("clone mutated original context: %#v", ctx)
 	}
 }
@@ -60,6 +62,22 @@ func TestTraitMatcher(t *testing.T) {
 	miss := matcher.Match(ActivationContext{Traits: []string{"standard"}})
 	if miss.Matched {
 		t.Fatalf("expected no match")
+	}
+}
+
+func TestPathMatcher(t *testing.T) {
+	matcher := PathMatcher{Patterns: []string{"*.go", "pkg/**/*.go"}}
+	result := matcher.Match(ActivationContext{CurrentPaths: []string{"main.go"}})
+	if !result.Matched {
+		t.Fatalf("expected top-level path match, got %+v", result)
+	}
+	result = matcher.Match(ActivationContext{CurrentPaths: []string{"pkg/api/agent.go"}})
+	if !result.Matched {
+		t.Fatalf("expected nested path match, got %+v", result)
+	}
+	miss := matcher.Match(ActivationContext{CurrentPaths: []string{"style.css"}})
+	if miss.Matched {
+		t.Fatalf("expected path miss, got %+v", miss)
 	}
 }
 

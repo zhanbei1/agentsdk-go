@@ -52,6 +52,10 @@ func (w *WriteTool) Description() string { return writeDescription }
 
 func (w *WriteTool) Schema() *tool.JSONSchema { return writeSchema }
 
+func (w *WriteTool) Metadata() tool.Metadata {
+	return tool.Metadata{}
+}
+
 func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) (*tool.ToolResult, error) {
 	if ctx == nil {
 		return nil, errors.New("context is nil")

@@ -100,13 +100,17 @@ func TestRuntimeHookAdapterNewEventsRecord(t *testing.T) {
 	if err := adapter.SubagentStop(context.Background(), hooks.SubagentStopPayload{Name: "sa", AgentID: "a1"}); err != nil {
 		t.Fatalf("subagent stop: %v", err)
 	}
+	if err := adapter.SubagentComplete(context.Background(), hooks.SubagentCompletePayload{TaskID: "t1", Name: "sa", Status: "success"}); err != nil {
+		t.Fatalf("subagent complete: %v", err)
+	}
 
 	drained := rec.Drain()
 	want := map[hooks.EventType]bool{
-		hooks.SessionStart:  false,
-		hooks.SessionEnd:    false,
-		hooks.SubagentStart: false,
-		hooks.SubagentStop:  false,
+		hooks.SessionStart:     false,
+		hooks.SessionEnd:       false,
+		hooks.SubagentStart:    false,
+		hooks.SubagentStop:     false,
+		hooks.SubagentComplete: false,
 	}
 	for _, evt := range drained {
 		if _, ok := want[evt.Type]; ok {

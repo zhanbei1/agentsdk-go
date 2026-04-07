@@ -40,6 +40,7 @@ func TestBuildPayload_SupportedTypes(t *testing.T) {
 		},
 		{Type: SubagentStart, Payload: SubagentStartPayload{Name: "agent", AgentID: "id", AgentType: "type", Metadata: map[string]any{"a": 1}}},
 		{Type: SubagentStop, Payload: SubagentStopPayload{Name: "agent", AgentID: "id", AgentType: "type", Reason: "done", TranscriptPath: "/tmp/x", StopHookActive: true}},
+		{Type: SubagentComplete, Payload: SubagentCompletePayload{TaskID: "task-1", Name: "agent", Status: "success", Output: "ok"}},
 		{Type: SessionStart, Payload: SessionStartPayload{SessionID: "s", Source: "cli", Model: "m"}},
 		{Type: SessionEnd, Payload: SessionEndPayload{SessionID: "s", Reason: "completed", Metadata: map[string]any{"k": "v"}}},
 		{Type: Stop, Payload: StopPayload{Reason: "max_iter", StopHookActive: true}},
@@ -93,6 +94,9 @@ func TestExtractMatcherTarget_Cases(t *testing.T) {
 		t.Fatalf("got=%q", got)
 	}
 	if got := extractMatcherTarget(SubagentStop, SubagentStopPayload{Name: "x"}); got != "x" {
+		t.Fatalf("got=%q", got)
+	}
+	if got := extractMatcherTarget(SubagentComplete, SubagentCompletePayload{Name: "x"}); got != "x" {
 		t.Fatalf("got=%q", got)
 	}
 	if got := extractMatcherTarget(Stop, StopPayload{Reason: "x"}); got != "" {

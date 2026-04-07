@@ -83,6 +83,10 @@ func (r *ReadTool) Description() string { return readDescription }
 
 func (r *ReadTool) Schema() *tool.JSONSchema { return readSchema }
 
+func (r *ReadTool) Metadata() tool.Metadata {
+	return tool.Metadata{IsReadOnly: true, IsConcurrencySafe: true}
+}
+
 func (r *ReadTool) Execute(ctx context.Context, params map[string]interface{}) (*tool.ToolResult, error) {
 	if ctx == nil {
 		return nil, errors.New("context is nil")

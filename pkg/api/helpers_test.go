@@ -421,9 +421,9 @@ func TestOptionsModeContext(t *testing.T) {
 }
 
 func TestActivationContext(t *testing.T) {
-	req := Request{Prompt: "p", Tags: map[string]string{"k": "v"}, Metadata: map[string]any{"m": "v"}, Channels: []string{"cli"}}
+	req := Request{Prompt: "p", Tags: map[string]string{"k": "v"}, Metadata: map[string]any{"m": "v", "api.current_paths": []string{"main.go"}}, Channels: []string{"cli"}}
 	act := req.activationContext("prompt")
-	if act.Prompt != "prompt" || len(act.Tags) != 1 {
+	if act.Prompt != "prompt" || len(act.Tags) != 1 || len(act.CurrentPaths) != 1 || act.CurrentPaths[0] != "main.go" {
 		t.Fatalf("unexpected activation: %+v", act)
 	}
 }

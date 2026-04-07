@@ -11,13 +11,14 @@ import (
 type EventType string
 
 const (
-	PreToolUse    EventType = "PreToolUse"
-	PostToolUse   EventType = "PostToolUse"
-	SessionStart  EventType = "SessionStart"
-	SessionEnd    EventType = "SessionEnd"
-	Stop          EventType = "Stop"
-	SubagentStart EventType = "SubagentStart"
-	SubagentStop  EventType = "SubagentStop"
+	PreToolUse       EventType = "PreToolUse"
+	PostToolUse      EventType = "PostToolUse"
+	SessionStart     EventType = "SessionStart"
+	SessionEnd       EventType = "SessionEnd"
+	Stop             EventType = "Stop"
+	SubagentStart    EventType = "SubagentStart"
+	SubagentStop     EventType = "SubagentStop"
+	SubagentComplete EventType = "SubagentComplete"
 )
 
 // Event represents a single occurrence in the system. It is intentionally
@@ -76,6 +77,7 @@ type SessionEndPayload struct {
 // StopPayload indicates a stop notification for the main agent.
 type StopPayload struct {
 	Reason         string
+	BlockingError  string
 	StopHookActive bool // whether a stop hook is currently active
 }
 
@@ -95,4 +97,13 @@ type SubagentStartPayload struct {
 	AgentID   string         // unique identifier for the subagent instance
 	AgentType string         // type of the subagent
 	Metadata  map[string]any // optional metadata
+}
+
+// SubagentCompletePayload is emitted when a background subagent finishes.
+type SubagentCompletePayload struct {
+	TaskID string
+	Name   string
+	Status string // "success" | "error"
+	Output string // truncated to 2000 chars
+	Error  string
 }

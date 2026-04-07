@@ -45,6 +45,7 @@ func registerTools(registry *tool.Registry, opts Options, settings *config.Setti
 			tools = append(tools, opts.CustomTools...)
 		}
 	}
+	tools = withToolSearch(tools)
 
 	disallowed := toLowerSet(opts.DisallowedTools)
 	if settings != nil && len(settings.DisallowedTools) > 0 {
@@ -88,6 +89,22 @@ func registerTools(registry *tool.Registry, opts Options, settings *config.Setti
 	}
 
 	return nil
+}
+
+func withToolSearch(tools []tool.Tool) []tool.Tool {
+	hasDeferred := false
+	for _, impl := range tools {
+		if impl != nil && canonicalToolName(impl.Name()) == canonicalToolName(toolbuiltin.ToolSearchName) {
+			return tools
+		}
+		if impl != nil && tool.ShouldDefer(impl) {
+			hasDeferred = true
+		}
+	}
+	if !hasDeferred {
+		return tools
+	}
+	return append(tools, toolbuiltin.NewToolSearchTool(tools))
 }
 
 func builtinToolFactories(root string, sandboxDisabled bool, entry EntryPoint, settings *config.Settings, skReg *skills.Registry) map[string]func() tool.Tool {

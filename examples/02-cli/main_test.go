@@ -33,6 +33,7 @@ func requireAPIKey(t *testing.T) {
 func TestRun_RequiresAPIKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("OPENAI_API_KEY", "")
 
 	var out bytes.Buffer
 	in := strings.NewReader("")
@@ -44,6 +45,7 @@ func TestRun_RequiresAPIKey(t *testing.T) {
 func TestBuildConfigAndOptions_RequiresKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("OPENAI_API_KEY", "")
 	var out bytes.Buffer
 	if _, _, err := buildConfigAndOptions(nil, &out); err == nil {
 		t.Fatalf("expected error")

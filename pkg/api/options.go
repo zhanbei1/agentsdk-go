@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -37,11 +38,15 @@ var filepathAbs = filepath.Abs
 type EntryPoint string
 
 const (
-	EntryPointCLI      EntryPoint = "cli"
-	EntryPointCI       EntryPoint = "ci"
-	EntryPointPlatform EntryPoint = "platform"
-	defaultEntrypoint             = EntryPointCLI
-	defaultMaxSessions            = 1000
+	EntryPointCLI               EntryPoint = "cli"
+	EntryPointCI                EntryPoint = "ci"
+	EntryPointPlatform          EntryPoint = "platform"
+	defaultEntrypoint                      = EntryPointCLI
+	defaultMaxSessions                     = 1000
+	defaultStopReinjectionLimit            = 3
+	defaultStreamStallTimeout              = 60 * time.Second
+	defaultEscalationAttempts              = 3
+	defaultEscalationCeiling               = 65536
 )
 
 type ModelTier string
@@ -61,6 +66,42 @@ type SandboxOptions struct {
 	AllowedPaths  []string
 	NetworkAllow  []string
 	ResourceLimit sandbox.ResourceLimits
+}
+
+type StreamStallConfig struct {
+	Timeout         time.Duration `json:"timeout"`
+	FallbackEnabled bool          `json:"fallback_enabled"`
+}
+
+func (c StreamStallConfig) withDefaults() StreamStallConfig {
+	cfg := c
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = defaultStreamStallTimeout
+	}
+	if !cfg.FallbackEnabled && c.Timeout <= 0 {
+		cfg.FallbackEnabled = true
+	}
+	return cfg
+}
+
+type MaxTokensEscalationConfig struct {
+	Enabled     bool `json:"enabled"`
+	MaxAttempts int  `json:"max_attempts"`
+	Ceiling     int  `json:"ceiling"`
+}
+
+func (c MaxTokensEscalationConfig) withDefaults() MaxTokensEscalationConfig {
+	cfg := c
+	if cfg.MaxAttempts <= 0 {
+		cfg.MaxAttempts = defaultEscalationAttempts
+	}
+	if cfg.Ceiling <= 0 {
+		cfg.Ceiling = defaultEscalationCeiling
+	}
+	if !cfg.Enabled && c.MaxAttempts <= 0 && c.Ceiling <= 0 {
+		cfg.Enabled = true
+	}
+	return cfg
 }
 
 type SkillRegistration struct {
@@ -104,25 +145,34 @@ type Options struct {
 
 	DefaultEnableCache bool
 
-	SystemPrompt string
-	RulesEnabled *bool // nil = 默认启用，false = 禁用
+	SystemPrompt        string
+	SystemPromptBuilder *SystemPromptBuilder
+	RulesEnabled        *bool // nil = 默认启用，false = 禁用
 
-	Middleware          []middleware.Middleware
-	MiddlewareTimeout   time.Duration
-	MaxIterations       int
-	Timeout             time.Duration
-	TokenLimit          int
-	MaxSessions         int
-	Tools               []tool.Tool
-	EnabledBuiltinTools []string
-	DisallowedTools     []string
-	CustomTools         []tool.Tool
-	MCPServers          []string
+	Middleware             []middleware.Middleware
+	MiddlewareTimeout      time.Duration
+	MaxIterations          int
+	Timeout                time.Duration
+	TokenLimit             int
+	TokenBudget            TokenBudgetConfig
+	MaxToolOutputSize      int
+	ToolConcurrency        int
+	StopReinjectionLimit   int
+	StreamStall            StreamStallConfig
+	MaxTokensEscalation    MaxTokensEscalationConfig
+	MaxSessions            int
+	MaxConcurrentSubagents int
+	Tools                  []tool.Tool
+	EnabledBuiltinTools    []string
+	DisallowedTools        []string
+	CustomTools            []tool.Tool
+	MCPServers             []string
 
-	TypedHooks        []hooks.ShellHook
-	HookMiddleware    []hooks.Middleware
-	HookTimeout       time.Duration
-	DisableSafetyHook bool
+	TypedHooks             []hooks.ShellHook
+	HookMiddleware         []hooks.Middleware
+	HookTimeout            time.Duration
+	DisableSafetyHook      bool
+	DisableSubagentSummary bool
 
 	Skills           []SkillRegistration
 	Subagents        []SubagentRegistration
@@ -245,6 +295,14 @@ func (o Options) withDefaults() Options {
 	if o.MaxSessions <= 0 {
 		o.MaxSessions = defaultMaxSessions
 	}
+	if o.ToolConcurrency <= 0 {
+		o.ToolConcurrency = runtime.NumCPU()
+	}
+	if o.StopReinjectionLimit <= 0 {
+		o.StopReinjectionLimit = defaultStopReinjectionLimit
+	}
+	o.StreamStall = o.StreamStall.withDefaults()
+	o.MaxTokensEscalation = o.MaxTokensEscalation.withDefaults()
 	return o
 }
 
@@ -252,6 +310,9 @@ func (o Options) withDefaults() Options {
 // the original Options struct without racing against a live Runtime.
 func (o Options) frozen() Options {
 	o.Mode = ModeContext{EntryPoint: o.Mode.EntryPoint}
+	if o.SystemPromptBuilder != nil {
+		o.SystemPromptBuilder = o.SystemPromptBuilder.Clone()
+	}
 
 	if len(o.Middleware) > 0 {
 		o.Middleware = append([]middleware.Middleware(nil), o.Middleware...)
@@ -394,6 +455,13 @@ func (r Request) activationContext(prompt string) skills.ActivationContext {
 	ctx := skills.ActivationContext{Prompt: prompt}
 	if len(r.Channels) > 0 {
 		ctx.Channels = append([]string(nil), r.Channels...)
+	}
+	if len(r.Metadata) > 0 {
+		if current := stringSlice(r.Metadata["api.current_paths"]); len(current) > 0 {
+			ctx.CurrentPaths = current
+		} else if current := stringSlice(r.Metadata["current_paths"]); len(current) > 0 {
+			ctx.CurrentPaths = current
+		}
 	}
 	if len(r.Traits) > 0 {
 		ctx.Traits = append([]string(nil), r.Traits...)
@@ -555,15 +623,58 @@ func (h *runtimeHookAdapter) PostToolUse(ctx context.Context, evt hooks.ToolResu
 }
 
 func (h *runtimeHookAdapter) Stop(ctx context.Context, reason string) error {
+	_, err := h.evaluateStop(ctx, reason)
+	return err
+}
+
+func (h *runtimeHookAdapter) evaluateStop(ctx context.Context, reason string) (string, error) {
 	if h == nil || h.executor == nil {
-		return nil
+		return "", nil
 	}
 	payload := hooks.StopPayload{Reason: reason}
-	if err := h.executor.Publish(hooks.Event{Type: hooks.Stop, Payload: payload}); err != nil {
-		return err
+	results, err := h.executor.Execute(ctx, hooks.Event{Type: hooks.Stop, Payload: payload})
+	if err != nil {
+		return "", err
+	}
+	for _, res := range results {
+		if res.Stderr != "" {
+			fmt.Fprint(os.Stderr, res.Stderr)
+		}
+		if res.Output == nil {
+			continue
+		}
+		if blockingReason, ok := stopBlockingReason(res.Output); ok {
+			payload.BlockingError = blockingReason
+			break
+		}
 	}
 	h.record(hooks.Event{Type: hooks.Stop, Payload: payload})
-	return nil
+	return payload.BlockingError, nil
+}
+
+func stopBlockingReason(out *hooks.HookOutput) (string, bool) {
+	if out == nil {
+		return "", false
+	}
+	if strings.EqualFold(strings.TrimSpace(out.Decision), "block") {
+		if reason := strings.TrimSpace(out.Reason); reason != "" {
+			return reason, true
+		}
+		if reason := strings.TrimSpace(out.StopReason); reason != "" {
+			return reason, true
+		}
+		return "blocked by stop hook", true
+	}
+	if out.Continue != nil && !*out.Continue {
+		if reason := strings.TrimSpace(out.StopReason); reason != "" {
+			return reason, true
+		}
+		if reason := strings.TrimSpace(out.Reason); reason != "" {
+			return reason, true
+		}
+		return "blocked by stop hook", true
+	}
+	return "", false
 }
 
 func (h *runtimeHookAdapter) SessionStart(ctx context.Context, evt hooks.SessionStartPayload) error {
@@ -607,6 +718,17 @@ func (h *runtimeHookAdapter) SubagentStop(ctx context.Context, evt hooks.Subagen
 		return err
 	}
 	h.record(hooks.Event{Type: hooks.SubagentStop, Payload: evt})
+	return nil
+}
+
+func (h *runtimeHookAdapter) SubagentComplete(ctx context.Context, evt hooks.SubagentCompletePayload) error {
+	if h == nil || h.executor == nil {
+		return nil
+	}
+	if err := h.executor.Publish(hooks.Event{Type: hooks.SubagentComplete, Payload: evt}); err != nil {
+		return err
+	}
+	h.record(hooks.Event{Type: hooks.SubagentComplete, Payload: evt})
 	return nil
 }
 

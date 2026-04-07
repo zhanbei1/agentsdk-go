@@ -21,6 +21,7 @@ const defaultModel = "claude-sonnet-4-5-20250929"
 var (
 	cliFatal    = log.Fatal
 	filepathAbs = filepath.Abs
+	getenv      = os.Getenv
 )
 
 type runConfig struct {
@@ -29,6 +30,7 @@ type runConfig struct {
 	enableMCP   bool
 	interactive bool
 	prompt      string
+	modelName   string
 }
 
 type runtimeRunner interface {
@@ -121,6 +123,7 @@ func buildConfigAndOptions(args []string, out io.Writer) (runConfig, api.Options
 	fs.BoolVar(&cfg.enableMCP, "enable-mcp", false, "enable MCP servers from .agents/settings.json (auto-loaded)")
 	fs.BoolVar(&cfg.interactive, "interactive", false, "run in interactive REPL mode (default: single prompt and exit)")
 	fs.StringVar(&cfg.prompt, "prompt", "你好", "single prompt used when not interactive")
+	fs.StringVar(&cfg.modelName, "model", "", "model name (default: auto-detect from provider)")
 	if err := fs.Parse(args); err != nil {
 		return runConfig{}, api.Options{}, err
 	}
@@ -138,14 +141,32 @@ func buildConfigAndOptions(args []string, out io.Writer) (runConfig, api.Options
 		opts.MCPServers = []string{}
 	}
 
-	apiKey := demomodel.AnthropicAPIKey()
-	if strings.TrimSpace(apiKey) == "" {
-		return runConfig{}, api.Options{}, fmt.Errorf("ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) is required")
-	}
-	opts.ModelFactory = &modelpkg.AnthropicProvider{
-		APIKey:    apiKey,
-		BaseURL:   demomodel.AnthropicBaseURL(),
-		ModelName: defaultModel,
+	openaiKey := strings.TrimSpace(getenv("OPENAI_API_KEY"))
+	anthropicKey := demomodel.AnthropicAPIKey()
+
+	switch {
+	case openaiKey != "":
+		modelName := cfg.modelName
+		if modelName == "" {
+			modelName = "gpt-4o"
+		}
+		opts.ModelFactory = &modelpkg.OpenAIProvider{
+			APIKey:    openaiKey,
+			BaseURL:   strings.TrimSpace(getenv("OPENAI_BASE_URL")),
+			ModelName: modelName,
+		}
+	case anthropicKey != "":
+		modelName := cfg.modelName
+		if modelName == "" {
+			modelName = defaultModel
+		}
+		opts.ModelFactory = &modelpkg.AnthropicProvider{
+			APIKey:    anthropicKey,
+			BaseURL:   demomodel.AnthropicBaseURL(),
+			ModelName: modelName,
+		}
+	default:
+		return runConfig{}, api.Options{}, fmt.Errorf("OPENAI_API_KEY or ANTHROPIC_API_KEY is required")
 	}
 
 	return cfg, opts, nil

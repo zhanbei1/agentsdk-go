@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,10 +14,13 @@ import (
 // Executor wires tool registry lookup with sandbox enforcement.
 // A nil sandbox manager disables enforcement.
 type Executor struct {
-	registry  *Registry
-	sandbox   *sandbox.Manager
-	persister *OutputPersister
+	registry      *Registry
+	sandbox       *sandbox.Manager
+	persister     *OutputPersister
+	maxOutputSize int
 }
+
+const defaultMaxToolOutputSize = 100 * 1024
 
 // NewExecutor constructs an executor backed by the provided registry. When
 // registry is nil a fresh Registry is created so callers never receive a nil
@@ -25,7 +29,7 @@ func NewExecutor(registry *Registry, sb *sandbox.Manager) *Executor {
 	if registry == nil {
 		registry = NewRegistry()
 	}
-	return &Executor{registry: registry, sandbox: sb}
+	return &Executor{registry: registry, sandbox: sb, maxOutputSize: defaultMaxToolOutputSize}
 }
 
 // Registry exposes the underlying registry primarily for tests.
@@ -74,6 +78,9 @@ func (e *Executor) Execute(ctx context.Context, call Call) (*CallResult, error) 
 	if e.persister != nil && res != nil {
 		// MaybePersist errors are logged internally; ignore return value
 		e.persister.MaybePersist(call, res) //nolint:errcheck
+	}
+	if res != nil {
+		applyOutputLimit(tool, res, e.maxOutputSize)
 	}
 	cr := &CallResult{
 		Call:        call,
@@ -135,4 +142,34 @@ func (e *Executor) WithOutputPersister(persister *OutputPersister) *Executor {
 	clone := *e
 	clone.persister = persister
 	return &clone
+}
+
+func (e *Executor) WithMaxOutputSize(limit int) *Executor {
+	if e == nil {
+		exec := NewExecutor(nil, nil)
+		exec.maxOutputSize = normalizeMaxOutputSize(limit)
+		return exec
+	}
+	clone := *e
+	clone.maxOutputSize = normalizeMaxOutputSize(limit)
+	return &clone
+}
+
+func normalizeMaxOutputSize(limit int) int {
+	if limit <= 0 {
+		return defaultMaxToolOutputSize
+	}
+	return limit
+}
+
+func applyOutputLimit(tool Tool, result *ToolResult, fallback int) {
+	if result == nil || result.OutputRef != nil || result.Output == "" {
+		return
+	}
+	limit := MaxOutputSizeOf(tool, normalizeMaxOutputSize(fallback))
+	if limit <= 0 || len(result.Output) <= limit {
+		return
+	}
+	originalSize := len(result.Output)
+	result.Output = result.Output[:limit] + "\n... [truncated, showing first " + strconv.Itoa(limit) + " of " + strconv.Itoa(originalSize) + " bytes]"
 }

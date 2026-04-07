@@ -27,6 +27,7 @@ type Message struct {
 	ContentBlocks    []ContentBlock // Multimodal content; takes precedence over Content when non-empty
 	ToolCalls        []ToolCall
 	ReasoningContent string
+	Metadata         map[string]any
 }
 
 // ToolCall mirrors the shape of a tool invocation produced by the assistant.
@@ -43,6 +44,7 @@ func CloneMessage(msg Message) Message {
 	clone := Message{Role: msg.Role, Content: msg.Content, ReasoningContent: msg.ReasoningContent}
 	clone.ContentBlocks = cloneContentBlocks(msg.ContentBlocks)
 	clone.ToolCalls = cloneToolCalls(msg.ToolCalls)
+	clone.Metadata = cloneMap(msg.Metadata)
 	return clone
 }
 

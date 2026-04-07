@@ -634,7 +634,7 @@ func TestExecuteAcceptsAllValidEvents(t *testing.T) {
 	validEvents := []EventType{
 		PreToolUse, PostToolUse,
 		SessionStart, SessionEnd,
-		Stop, SubagentStart, SubagentStop,
+		Stop, SubagentStart, SubagentStop, SubagentComplete,
 	}
 	for _, et := range validEvents {
 		exec := NewExecutor()

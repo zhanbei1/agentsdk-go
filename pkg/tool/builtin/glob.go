@@ -85,6 +85,10 @@ func (g *GlobTool) Description() string { return globToolDesc }
 
 func (g *GlobTool) Schema() *tool.JSONSchema { return globSchema }
 
+func (g *GlobTool) Metadata() tool.Metadata {
+	return tool.Metadata{IsReadOnly: true, IsConcurrencySafe: true}
+}
+
 func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (*tool.ToolResult, error) {
 	if ctx == nil {
 		return nil, errors.New("context is nil")

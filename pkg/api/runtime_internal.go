@@ -111,6 +111,7 @@ func (rt *Runtime) runAgentWithMiddleware(prep preparedRun, extras ...middleware
 		root:      rt.sbRoot,
 		host:      "localhost",
 		sessionID: prep.normalized.SessionID,
+		deferred:  rt.deferred,
 	}
 
 	chainItems := make([]middleware.Middleware, 0, len(rt.opts.Middleware)+len(extras))
@@ -169,10 +170,10 @@ func (rt *Runtime) runLoop(prep preparedRun, mdl model.Model, hookAdapter *runti
 
 	ctx = context.WithValue(ctx, model.MiddlewareStateKey, state)
 
-	systemPrompt := rt.opts.SystemPrompt
+	systemPrompt := rt.systemPromptForSession(prep.normalized.SessionID, prep.toolWhitelist)
 
 	trimmer := rt.newTrimmer()
-	toolDefs := availableTools(rt.registry, prep.toolWhitelist)
+	budgetTracker := newTokenBudgetTracker(rt.opts.TokenBudget)
 
 	tracer := rt.opts.tracer
 	agentSpan := SpanContext(nil)
@@ -194,6 +195,7 @@ func (rt *Runtime) runLoop(prep preparedRun, mdl model.Model, hookAdapter *runti
 	}()
 
 	var last *model.Response
+	stopReinjections := 0
 	for iteration := 0; ; iteration++ {
 		iterations = iteration + 1
 		if err := ctx.Err(); err != nil {
@@ -218,6 +220,7 @@ func (rt *Runtime) runLoop(prep preparedRun, mdl model.Model, hookAdapter *runti
 		if trimmer != nil {
 			snapshot = trimmer.Trim(snapshot)
 		}
+		toolDefs := availableToolsForSession(rt.registry, prep.toolWhitelist, rt.deferred, prep.normalized.SessionID)
 
 		req := model.Request{
 			Messages:          convertMessages(snapshot),
@@ -232,29 +235,14 @@ func (rt *Runtime) runLoop(prep preparedRun, mdl model.Model, hookAdapter *runti
 			return last, err
 		}
 
-		var resp *model.Response
-		modelSpan := SpanContext(nil)
-		if tracer != nil {
-			modelSpan = tracer.StartModelSpan(agentSpan, strings.TrimSpace(req.Model))
-		}
-		if err := mdl.CompleteStream(ctx, req, func(sr model.StreamResult) error {
-			if sr.Final && sr.Response != nil {
-				resp = sr.Response
-			}
-			return nil
-		}); err != nil {
-			if tracer != nil {
-				tracer.EndSpan(modelSpan, map[string]any{
-					"session_id": strings.TrimSpace(prep.normalized.SessionID),
-					"request_id": strings.TrimSpace(prep.normalized.RequestID),
-				}, err)
-			}
+		resp, err := rt.completeWithRecovery(ctx, mdl, req, prep.history, tracer, agentSpan, prep.normalized)
+		if err != nil {
 			runErr = err
 			return last, err
 		}
 		if resp == nil {
 			if tracer != nil {
-				tracer.EndSpan(modelSpan, map[string]any{
+				tracer.EndSpan(nil, map[string]any{
 					"session_id": strings.TrimSpace(prep.normalized.SessionID),
 					"request_id": strings.TrimSpace(prep.normalized.RequestID),
 				}, errors.New("api: model returned no final response"))
@@ -262,20 +250,12 @@ func (rt *Runtime) runLoop(prep preparedRun, mdl model.Model, hookAdapter *runti
 			runErr = errors.New("api: model returned no final response")
 			return last, errors.New("api: model returned no final response")
 		}
-		if tracer != nil {
-			tracer.EndSpan(modelSpan, map[string]any{
-				"session_id":    strings.TrimSpace(prep.normalized.SessionID),
-				"request_id":    strings.TrimSpace(prep.normalized.RequestID),
-				"stop_reason":   resp.StopReason,
-				"input_tokens":  resp.Usage.InputTokens,
-				"output_tokens": resp.Usage.OutputTokens,
-			}, nil)
-		}
 		last = resp
 		state.ModelOutput = resp
 		state.Values["model.response"] = resp
 		state.Values["model.usage"] = resp.Usage
 		state.Values["model.stop_reason"] = resp.StopReason
+		stopErr := budgetTracker.Observe(resp.Usage)
 
 		assistant := message.Message{
 			Role:             resp.Message.Role,
@@ -295,40 +275,39 @@ func (rt *Runtime) runLoop(prep preparedRun, mdl model.Model, hookAdapter *runti
 			return last, err
 		}
 		if len(resp.Message.ToolCalls) > 0 {
-			var firstMiddlewareErr error
-			for _, call := range resp.Message.ToolCalls {
-				state.ToolCall = call
-				if err := chain.Execute(ctx, middleware.StageBeforeTool, state); err != nil && firstMiddlewareErr == nil {
-					firstMiddlewareErr = err
-				}
-				if tools == nil {
-					runErr = errors.New("api: tool executor is nil")
-					return last, errors.New("api: tool executor is nil")
-				}
-				toolSpan := SpanContext(nil)
-				if tracer != nil {
-					toolSpan = tracer.StartToolSpan(agentSpan, strings.TrimSpace(call.Name))
-				}
-				res, toolErr := tools.Execute(ctx, call)
-				if tracer != nil {
-					tracer.EndSpan(toolSpan, map[string]any{
-						"session_id":  strings.TrimSpace(prep.normalized.SessionID),
-						"request_id":  strings.TrimSpace(prep.normalized.RequestID),
-						"tool_use_id": strings.TrimSpace(call.ID),
-						"tool_name":   strings.TrimSpace(call.Name),
-					}, toolErr)
-				}
-				state.ToolResult = res
-				if err := chain.Execute(ctx, middleware.StageAfterTool, state); err != nil && firstMiddlewareErr == nil {
-					firstMiddlewareErr = err
-				}
+			if err := rt.executeToolCalls(ctx, resp.Message.ToolCalls, tools, chain, state, tracer, agentSpan, prep.normalized); err != nil {
+				runErr = err
+				return last, err
 			}
-			if firstMiddlewareErr != nil {
-				runErr = firstMiddlewareErr
-				return last, firstMiddlewareErr
+			if stopErr != nil {
+				runErr = stopErr
+				return resp, stopErr
 			}
 		}
 		if len(resp.Message.ToolCalls) == 0 {
+			if stopErr != nil {
+				runErr = stopErr
+				return resp, stopErr
+			}
+			if hookAdapter != nil {
+				blockingError, err := hookAdapter.evaluateStop(ctx, resp.StopReason)
+				if err != nil {
+					runErr = err
+					return resp, err
+				}
+				if blockingError != "" {
+					stopReinjections++
+					if stopReinjections > rt.opts.StopReinjectionLimit {
+						runErr = fmt.Errorf("hooks: stop blocked: %s", blockingError)
+						return resp, runErr
+					}
+					prep.history.Append(message.Message{
+						Role:    "user",
+						Content: fmt.Sprintf("[System] Stop blocked: %s. Please address this issue.", blockingError),
+					})
+					continue
+				}
+			}
 			runErr = nil
 			return resp, nil
 		}

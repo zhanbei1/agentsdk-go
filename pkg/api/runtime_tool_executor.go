@@ -14,6 +14,7 @@ import (
 	"github.com/stellarlinkco/agentsdk-go/pkg/runtime/subagents"
 	"github.com/stellarlinkco/agentsdk-go/pkg/sandbox"
 	"github.com/stellarlinkco/agentsdk-go/pkg/tool"
+	toolbuiltin "github.com/stellarlinkco/agentsdk-go/pkg/tool/builtin"
 )
 
 type runtimeToolExecutor struct {
@@ -24,6 +25,16 @@ type runtimeToolExecutor struct {
 	root      string
 	host      string
 	sessionID string
+	deferred  *deferredToolState
+}
+
+func (t *runtimeToolExecutor) withoutHistory() *runtimeToolExecutor {
+	if t == nil {
+		return nil
+	}
+	clone := *t
+	clone.history = nil
+	return &clone
 }
 
 func (t *runtimeToolExecutor) measureUsage() sandbox.ResourceUsage {
@@ -57,6 +68,10 @@ func (t *runtimeToolExecutor) isAllowed(ctx context.Context, name string) bool {
 }
 
 func (t *runtimeToolExecutor) Execute(ctx context.Context, call model.ToolCall) (*tool.CallResult, error) {
+	return t.execute(ctx, call, true)
+}
+
+func (t *runtimeToolExecutor) execute(ctx context.Context, call model.ToolCall, appendHistory bool) (*tool.CallResult, error) {
 	if t.executor == nil {
 		return nil, errors.New("tool executor not initialised")
 	}
@@ -65,7 +80,7 @@ func (t *runtimeToolExecutor) Execute(ctx context.Context, call model.ToolCall) 
 	}
 
 	appendToolResult := func(content string) {
-		if t.history == nil {
+		if !appendHistory || t.history == nil {
 			return
 		}
 		t.history.Append(message.Message{
@@ -108,7 +123,7 @@ func (t *runtimeToolExecutor) Execute(ctx context.Context, call model.ToolCall) 
 		params, preErr = t.hooks.PreToolUse(ctx, coreToolUsePayload(call))
 	}
 	if preErr != nil {
-		errContent := fmt.Sprintf(`{"error":%q}`, preErr.Error())
+		errContent := toolCallResultContent(nil, preErr)
 		appendToolResult(errContent)
 		now := time.Now()
 		return &tool.CallResult{
@@ -145,14 +160,7 @@ func (t *runtimeToolExecutor) Execute(ctx context.Context, call model.ToolCall) 
 	}
 
 	result, err := t.executor.Execute(ctx, callSpec)
-
-	content := ""
-	if result != nil && result.Result != nil {
-		content = result.Result.Output
-	}
-	if err != nil {
-		content = fmt.Sprintf(`{"error":%q}`, err.Error())
-	}
+	content := toolCallResultContent(result, err)
 
 	if t.hooks != nil {
 		if hookErr := t.hooks.PostToolUse(ctx, coreToolResultPayload(call, result, err)); hookErr != nil && err == nil {
@@ -162,7 +170,32 @@ func (t *runtimeToolExecutor) Execute(ctx context.Context, call model.ToolCall) 
 	}
 
 	appendToolResult(content)
+	t.activateDeferredTools(call, result)
 	return result, err
+}
+
+func (t *runtimeToolExecutor) appendCallResult(call model.ToolCall, result *tool.CallResult, err error) {
+	if t == nil || t.history == nil {
+		return
+	}
+	t.history.Append(message.Message{
+		Role: "tool",
+		ToolCalls: []message.ToolCall{{
+			ID:     call.ID,
+			Name:   call.Name,
+			Result: toolCallResultContent(result, err),
+		}},
+	})
+}
+
+func toolCallResultContent(result *tool.CallResult, err error) string {
+	if err != nil {
+		return fmt.Sprintf(`{"error":%q}`, err.Error())
+	}
+	if result != nil && result.Result != nil {
+		return result.Result.Output
+	}
+	return ""
 }
 
 func coreToolUsePayload(call model.ToolCall) hooks.ToolUsePayload {
@@ -177,4 +210,37 @@ func coreToolResultPayload(call model.ToolCall, res *tool.CallResult, err error)
 	}
 	payload.Err = err
 	return payload
+}
+
+func (t *runtimeToolExecutor) activateDeferredTools(call model.ToolCall, result *tool.CallResult) {
+	if t == nil || t.deferred == nil || canonicalToolName(call.Name) != canonicalToolName(toolbuiltin.ToolSearchName) {
+		return
+	}
+	if result == nil || result.Result == nil || result.Result.Data == nil {
+		return
+	}
+	data, ok := result.Result.Data.(map[string]any)
+	if !ok || len(data) == 0 {
+		return
+	}
+	raw, ok := data["activated"]
+	if !ok {
+		return
+	}
+	names, ok := raw.([]string)
+	if ok {
+		t.deferred.activate(t.sessionID, names)
+		return
+	}
+	values, ok := raw.([]any)
+	if !ok {
+		return
+	}
+	names = make([]string, 0, len(values))
+	for _, value := range values {
+		if name, ok := value.(string); ok && name != "" {
+			names = append(names, name)
+		}
+	}
+	t.deferred.activate(t.sessionID, names)
 }

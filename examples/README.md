@@ -2,7 +2,7 @@
 
 # agentsdk-go Examples
 
-Twelve examples. Run everything from the repo root.
+Thirteen examples. Run everything from the repo root.
 
 **Environment Setup**
 
@@ -35,6 +35,7 @@ export ANTHROPIC_API_KEY=sk-ant-your-key-here
 - `10-hooks` (~85 lines): hooks system with PreToolUse/PostToolUse shell hooks.
 - `11-reasoning` (~186 lines): reasoning model support (DeepSeek-R1 reasoning_content passthrough).
 - `12-multimodal` (~135 lines): multimodal content blocks (text + images).
+- `13-v21-features` (~500 lines): v2.1 feature demo: token budget, micro-compaction, tool concurrency, output limit, async subagent, SystemPromptBuilder, deferred tools.
 
 ## 01-basic — minimal entry
 - Purpose: fastest way to see the SDK loop in action with one request/response.
@@ -132,4 +133,14 @@ go run ./examples/11-reasoning
 ```bash
 source .env
 go run ./examples/12-multimodal
+```
+
+## 13-v21-features — v2.1 Feature Demo
+- Key features: no API key needed, uses stub models to verify all v2.1 features: token budget, micro-compaction, tool concurrency, output limit, async subagent, SystemPromptBuilder, deferred tools.
+- Run:
+```bash
+go run ./examples/13-v21-features -all
+go run ./examples/13-v21-features -feature token_budget
+go run ./examples/13-v21-features -feature subagent_async
+go run ./examples/13-v21-features -feature prompt_builder
 ```

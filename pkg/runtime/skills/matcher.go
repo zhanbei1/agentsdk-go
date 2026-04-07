@@ -2,6 +2,7 @@ package skills
 
 import (
 	"maps"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -9,11 +10,12 @@ import (
 
 // ActivationContext captures conversational state used for auto-activation.
 type ActivationContext struct {
-	Prompt   string
-	Channels []string
-	Tags     map[string]string
-	Traits   []string
-	Metadata map[string]any
+	Prompt       string
+	Channels     []string
+	CurrentPaths []string
+	Tags         map[string]string
+	Traits       []string
+	Metadata     map[string]any
 }
 
 // Clone produces an isolated copy of the activation context.
@@ -21,6 +23,9 @@ func (c ActivationContext) Clone() ActivationContext {
 	cloned := ActivationContext{Prompt: c.Prompt}
 	if len(c.Channels) > 0 {
 		cloned.Channels = append([]string(nil), c.Channels...)
+	}
+	if len(c.CurrentPaths) > 0 {
+		cloned.CurrentPaths = append([]string(nil), c.CurrentPaths...)
 	}
 	if len(c.Traits) > 0 {
 		cloned.Traits = append([]string(nil), c.Traits...)
@@ -200,6 +205,56 @@ func (m TraitMatcher) Match(ctx ActivationContext) MatchResult {
 	return MatchResult{Matched: true, Score: score, Reason: reason}
 }
 
+// PathMatcher matches current paths against glob patterns.
+type PathMatcher struct {
+	Patterns []string
+}
+
+// Match implements Matcher.
+func (m PathMatcher) Match(ctx ActivationContext) MatchResult {
+	patterns := normalizePathPatterns(m.Patterns)
+	if len(patterns) == 0 || len(ctx.CurrentPaths) == 0 {
+		return MatchResult{}
+	}
+	for _, current := range ctx.CurrentPaths {
+		current = normalizeGlobValue(current)
+		if current == "" {
+			continue
+		}
+		for _, pattern := range patterns {
+			if matchPathPattern(pattern, current) {
+				return MatchResult{
+					Matched: true,
+					Score:   0.75,
+					Reason:  "paths:hit=" + pattern,
+				}
+			}
+		}
+	}
+	return MatchResult{}
+}
+
+func normalizePathPatterns(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	set := map[string]struct{}{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		normalized := normalizeGlobValue(value)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := set[normalized]; ok {
+			continue
+		}
+		set[normalized] = struct{}{}
+		result = append(result, normalized)
+	}
+	slices.Sort(result)
+	return result
+}
+
 func normalizeTokens(values []string) []string {
 	if len(values) == 0 {
 		return nil
@@ -249,6 +304,60 @@ func tokenSet(values []string) map[string]struct{} {
 		set[norm] = struct{}{}
 	}
 	return set
+}
+
+func normalizeGlobValue(value string) string {
+	normalized := strings.TrimSpace(value)
+	if normalized == "" {
+		return ""
+	}
+	normalized = filepathToSlash(normalized)
+	normalized = strings.TrimPrefix(normalized, "./")
+	normalized = strings.TrimPrefix(normalized, "/")
+	return strings.TrimSpace(normalized)
+}
+
+func filepathToSlash(value string) string {
+	return strings.ReplaceAll(value, "\\", "/")
+}
+
+func matchPathPattern(pattern, value string) bool {
+	pattern = normalizeGlobValue(pattern)
+	value = normalizeGlobValue(value)
+	if pattern == "" || value == "" {
+		return false
+	}
+	return matchPathSegments(splitGlob(pattern), splitGlob(value))
+}
+
+func splitGlob(value string) []string {
+	if value == "" {
+		return nil
+	}
+	return strings.Split(value, "/")
+}
+
+func matchPathSegments(patterns, values []string) bool {
+	if len(patterns) == 0 {
+		return len(values) == 0
+	}
+	if patterns[0] == "**" {
+		if matchPathSegments(patterns[1:], values) {
+			return true
+		}
+		if len(values) == 0 {
+			return false
+		}
+		return matchPathSegments(patterns, values[1:])
+	}
+	if len(values) == 0 {
+		return false
+	}
+	ok, err := path.Match(patterns[0], values[0])
+	if err != nil || !ok {
+		return false
+	}
+	return matchPathSegments(patterns[1:], values[1:])
 }
 
 func clampScore(score float64) float64 {

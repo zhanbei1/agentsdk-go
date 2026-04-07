@@ -158,6 +158,10 @@ func (g *GrepTool) Description() string { return grepToolDesc }
 
 func (g *GrepTool) Schema() *tool.JSONSchema { return grepSchema }
 
+func (g *GrepTool) Metadata() tool.Metadata {
+	return tool.Metadata{IsReadOnly: true, IsConcurrencySafe: true}
+}
+
 func (g *GrepTool) Execute(ctx context.Context, params map[string]interface{}) (*tool.ToolResult, error) {
 	if ctx == nil {
 		return nil, errors.New("context is nil")

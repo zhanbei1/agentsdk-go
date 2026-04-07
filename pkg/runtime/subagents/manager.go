@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/stellarlinkco/agentsdk-go/pkg/runtime/skills"
 )
@@ -17,8 +18,9 @@ const (
 	TypeExplore        = "explore"
 	TypePlan           = "plan"
 
-	ModelSonnet = "sonnet"
-	ModelHaiku  = "haiku"
+	ModelSonnet                    = "sonnet"
+	ModelHaiku                     = "haiku"
+	defaultMaxConcurrentBackground = 3
 )
 
 var (
@@ -26,6 +28,16 @@ var (
 	ErrUnknownSubagent    = errors.New("subagents: unknown target")
 	ErrNoMatchingSubagent = errors.New("subagents: no matching subagent")
 	ErrEmptyInstruction   = errors.New("subagents: instruction is empty")
+	ErrUnknownTask        = errors.New("subagents: unknown task")
+)
+
+type StatusState string
+
+const (
+	StatusQueued  StatusState = "queued"
+	StatusRunning StatusState = "running"
+	StatusSuccess StatusState = "success"
+	StatusError   StatusState = "error"
 )
 
 var builtinSubagentTypes = map[string]Definition{
@@ -145,14 +157,40 @@ func (r Result) clone() Result {
 	return r
 }
 
+type Status struct {
+	TaskID      string
+	Name        string
+	Instruction string
+	SessionID   string
+	State       StatusState
+	Result      Result
+	Output      string
+	Error       string
+}
+
+func (s Status) clone() Status {
+	s.Result = s.Result.clone()
+	return s
+}
+
 type Manager struct {
-	mu        sync.RWMutex
-	subagents map[string]*registeredSubagent
+	mu                      sync.RWMutex
+	subagents               map[string]*registeredSubagent
+	tasks                   map[string]Status
+	backgroundSlots         chan struct{}
+	maxConcurrentBackground int
+	onComplete              func(Status)
+	nextTaskID              uint64
 }
 
 // NewManager builds a new manager.
 func NewManager() *Manager {
-	return &Manager{subagents: map[string]*registeredSubagent{}}
+	return &Manager{
+		subagents:               map[string]*registeredSubagent{},
+		tasks:                   map[string]Status{},
+		backgroundSlots:         make(chan struct{}, defaultMaxConcurrentBackground),
+		maxConcurrentBackground: defaultMaxConcurrentBackground,
+	}
 }
 
 // Register installs a subagent definition + handler.
@@ -220,6 +258,9 @@ func (m *Manager) Dispatch(ctx context.Context, req Request) (Result, error) {
 		return Result{}, err
 	}
 	runCtx := target.definition.BaseContext.Clone()
+	if inherited, ok := FromContext(ctx); ok {
+		runCtx = mergeContext(runCtx, inherited)
+	}
 	if len(req.Metadata) > 0 {
 		runCtx = runCtx.WithMetadata(req.Metadata)
 	}
@@ -238,6 +279,123 @@ func (m *Manager) Dispatch(ctx context.Context, req Request) (Result, error) {
 		return result, execErr
 	}
 	return result, nil
+}
+
+func (m *Manager) SetCompletionHandler(fn func(Status)) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onComplete = fn
+}
+
+func (m *Manager) SetMaxConcurrentBackground(n int) {
+	if m == nil {
+		return
+	}
+	if n <= 0 {
+		n = defaultMaxConcurrentBackground
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.maxConcurrentBackground = n
+	m.backgroundSlots = make(chan struct{}, n)
+}
+
+func (m *Manager) DispatchAsync(ctx context.Context, name, instruction string) (string, error) {
+	return m.dispatchAsync(ctx, Request{Target: name, Instruction: instruction})
+}
+
+func (m *Manager) TaskStatus(taskID string) (Status, error) {
+	if m == nil {
+		return Status{}, ErrUnknownTask
+	}
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return Status{}, ErrUnknownTask
+	}
+	m.mu.RLock()
+	status, ok := m.tasks[taskID]
+	m.mu.RUnlock()
+	if !ok {
+		return Status{}, ErrUnknownTask
+	}
+	return status.clone(), nil
+}
+
+func (m *Manager) dispatchAsync(ctx context.Context, req Request) (string, error) {
+	if strings.TrimSpace(req.Instruction) == "" {
+		return "", ErrEmptyInstruction
+	}
+	taskID := fmt.Sprintf("task-%d", atomic.AddUint64(&m.nextTaskID, 1))
+	status := Status{
+		TaskID:      taskID,
+		Name:        strings.ToLower(strings.TrimSpace(req.Target)),
+		Instruction: strings.TrimSpace(req.Instruction),
+		SessionID:   sessionID(ctx, req.Metadata),
+		State:       StatusQueued,
+	}
+
+	m.mu.Lock()
+	m.tasks[taskID] = status
+	sem := m.backgroundSlots
+	onComplete := m.onComplete
+	m.mu.Unlock()
+
+	go func() {
+		dispatchCtx := ctx
+		if dispatchCtx == nil {
+			dispatchCtx = context.Background()
+		}
+
+		select {
+		case sem <- struct{}{}:
+		case <-dispatchCtx.Done():
+			m.completeTask(Status{
+				TaskID:      taskID,
+				Name:        status.Name,
+				Instruction: status.Instruction,
+				SessionID:   status.SessionID,
+				State:       StatusError,
+				Error:       dispatchCtx.Err().Error(),
+			}, onComplete)
+			return
+		}
+		defer func() { <-sem }()
+
+		m.updateTask(taskID, func(current *Status) {
+			current.State = StatusRunning
+		})
+
+		result, err := m.Dispatch(dispatchCtx, req)
+		output := ""
+		if result.Output != nil {
+			output = strings.TrimSpace(fmt.Sprint(result.Output))
+		}
+		final := Status{
+			TaskID:      taskID,
+			Name:        result.Subagent,
+			Instruction: status.Instruction,
+			SessionID:   status.SessionID,
+			Result:      result.clone(),
+			Output:      output,
+			Error:       strings.TrimSpace(result.Error),
+			State:       StatusSuccess,
+		}
+		if final.Name == "" {
+			final.Name = status.Name
+		}
+		if err != nil {
+			final.State = StatusError
+			if final.Error == "" {
+				final.Error = err.Error()
+			}
+		}
+		m.completeTask(final, onComplete)
+	}()
+
+	return taskID, nil
 }
 
 func (m *Manager) selectTarget(req Request) (*registeredSubagent, error) {
@@ -322,6 +480,56 @@ func (m *Manager) matching(ctx skills.ActivationContext) []*registeredSubagent {
 		filtered = append(filtered, cand.sub)
 	}
 	return filtered
+}
+
+func (m *Manager) updateTask(taskID string, update func(*Status)) {
+	if update == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, ok := m.tasks[taskID]
+	if !ok {
+		return
+	}
+	update(&current)
+	m.tasks[taskID] = current
+}
+
+func (m *Manager) completeTask(status Status, onComplete func(Status)) {
+	status = status.clone()
+	m.mu.Lock()
+	m.tasks[status.TaskID] = status
+	m.mu.Unlock()
+	if onComplete != nil {
+		onComplete(status.clone())
+	}
+}
+
+func mergeContext(base Context, inherited Context) Context {
+	if session := strings.TrimSpace(inherited.SessionID); session != "" {
+		base.SessionID = session
+	}
+	base = base.WithMetadata(inherited.Metadata)
+	if len(inherited.ToolWhitelist) > 0 {
+		base = base.RestrictTools(inherited.ToolWhitelist...)
+	}
+	if model := strings.TrimSpace(inherited.Model); model != "" {
+		base.Model = model
+	}
+	return base
+}
+
+func sessionID(ctx context.Context, meta map[string]any) string {
+	if inherited, ok := FromContext(ctx); ok {
+		if session := strings.TrimSpace(inherited.SessionID); session != "" {
+			return session
+		}
+	}
+	if raw, ok := meta["session_id"].(string); ok {
+		return strings.TrimSpace(raw)
+	}
+	return ""
 }
 
 func cloneDefinition(def Definition) Definition {

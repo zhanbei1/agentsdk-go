@@ -73,6 +73,20 @@ func (f *fixedOutputTool) Execute(context.Context, map[string]interface{}) (*Too
 	return &ToolResult{Success: true, Output: f.output, OutputRef: f.ref}, nil
 }
 
+type limitedOutputTool struct {
+	name   string
+	output string
+	limit  int
+}
+
+func (l *limitedOutputTool) Name() string        { return l.name }
+func (l *limitedOutputTool) Description() string { return "limited output" }
+func (l *limitedOutputTool) Schema() *JSONSchema { return nil }
+func (l *limitedOutputTool) Execute(context.Context, map[string]interface{}) (*ToolResult, error) {
+	return &ToolResult{Success: true, Output: l.output}, nil
+}
+func (l *limitedOutputTool) MaxOutputSize() int { return l.limit }
+
 type fakeFSPolicy struct {
 	last string
 	err  error
@@ -356,6 +370,46 @@ func TestExecutorPersisterSkipsWhenOutputRefAlreadySet(t *testing.T) {
 	}
 	if cr.Result.OutputRef != ref {
 		t.Fatalf("expected output ref to be preserved, got %+v", cr.Result.OutputRef)
+	}
+}
+
+func TestExecutorTruncatesLargeOutputUsingGlobalLimit(t *testing.T) {
+	reg := NewRegistry()
+	impl := &fixedOutputTool{name: "echo", output: "1234567890"}
+	if err := reg.Register(impl); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	exec := NewExecutor(reg, nil).WithMaxOutputSize(5)
+
+	cr, err := exec.Execute(context.Background(), Call{Name: "echo"})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if cr == nil || cr.Result == nil {
+		t.Fatalf("expected tool result")
+	}
+	if got, want := cr.Result.Output, "12345\n... [truncated, showing first 5 of 10 bytes]"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestExecutorTruncatesLargeOutputUsingToolSpecificLimit(t *testing.T) {
+	reg := NewRegistry()
+	impl := &limitedOutputTool{name: "echo", output: "abcdefghij", limit: 3}
+	if err := reg.Register(impl); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	exec := NewExecutor(reg, nil).WithMaxOutputSize(8)
+
+	cr, err := exec.Execute(context.Background(), Call{Name: "echo"})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if cr == nil || cr.Result == nil {
+		t.Fatalf("expected tool result")
+	}
+	if got, want := cr.Result.Output, "abc\n... [truncated, showing first 3 of 10 bytes]"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
 	}
 }
 

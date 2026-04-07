@@ -63,6 +63,10 @@ func (e *EditTool) Description() string { return editDescription }
 
 func (e *EditTool) Schema() *tool.JSONSchema { return editSchema }
 
+func (e *EditTool) Metadata() tool.Metadata {
+	return tool.Metadata{}
+}
+
 func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (*tool.ToolResult, error) {
 	if ctx == nil {
 		return nil, errors.New("context is nil")

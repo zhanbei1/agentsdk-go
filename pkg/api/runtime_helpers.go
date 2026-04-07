@@ -20,13 +20,17 @@ import (
 )
 
 func availableTools(registry *tool.Registry, whitelist map[string]struct{}) []model.ToolDefinition {
+	return availableToolsForSession(registry, whitelist, nil, "")
+}
+
+func availableToolsForSession(registry *tool.Registry, whitelist map[string]struct{}, deferred *deferredToolState, sessionID string) []model.ToolDefinition {
 	if registry == nil {
 		return nil
 	}
-	return availableToolsFromList(registry.List(), whitelist)
+	return availableToolsFromList(registry.List(), whitelist, deferred, sessionID)
 }
 
-func availableToolsFromList(tools []tool.Tool, whitelist map[string]struct{}) []model.ToolDefinition {
+func availableToolsFromList(tools []tool.Tool, whitelist map[string]struct{}, deferred *deferredToolState, sessionID string) []model.ToolDefinition {
 	defs := make([]model.ToolDefinition, 0, len(tools))
 	for _, impl := range tools {
 		if impl == nil {
@@ -41,6 +45,9 @@ func availableToolsFromList(tools []tool.Tool, whitelist map[string]struct{}) []
 			if _, ok := whitelist[canon]; !ok {
 				continue
 			}
+		}
+		if !deferred.shouldExpose(name, sessionID) {
+			continue
 		}
 		defs = append(defs, model.ToolDefinition{
 			Name:        name,
@@ -198,7 +205,8 @@ func buildSkillsRegistry(opts Options) (*skills.Registry, []error) {
 		ProjectRoot: loader.ProjectRoot,
 		UserHome:    loader.UserHome,
 		EnableUser:  loader.EnableUser,
-		FS:          loader.fs,
+		FS:          config.NewFS(loader.ProjectRoot, nil),
+		EmbedFS:     opts.EmbedFS,
 	})
 
 	merged := mergeSkillRegistrations(fsRegs, opts.Skills, &errs)
@@ -352,6 +360,23 @@ func (s *historyStore) Get(id string) *message.History {
 		}
 	}
 	return hist
+}
+
+func (s *historyStore) Loaded(id string) (*message.History, bool) {
+	if s == nil {
+		return nil, false
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	hist, ok := s.data[id]
+	if ok {
+		s.lastUsed[id] = time.Now()
+	}
+	return hist, ok
 }
 
 func (s *historyStore) evictOldest() string {

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stellarlinkco/agentsdk-go/pkg/runtime/skills"
 )
@@ -428,5 +429,89 @@ func TestManagerDispatchConcurrent(t *testing.T) {
 	}
 	if atomic.LoadInt32(&counter) != workers {
 		t.Fatalf("expected %d handler invocations, got %d", workers, counter)
+	}
+}
+
+func TestManagerDispatchAsyncAndTaskStatus(t *testing.T) {
+	m := NewManager()
+	m.SetMaxConcurrentBackground(1)
+
+	var running int32
+	var maxRunning int32
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	completed := make(chan Status, 2)
+
+	if err := m.Register(Definition{Name: "worker"}, HandlerFunc(func(ctx context.Context, subCtx Context, req Request) (Result, error) {
+		current := atomic.AddInt32(&running, 1)
+		for {
+			seen := atomic.LoadInt32(&maxRunning)
+			if current <= seen || atomic.CompareAndSwapInt32(&maxRunning, seen, current) {
+				break
+			}
+		}
+		started <- req.Instruction
+		<-release
+		atomic.AddInt32(&running, -1)
+		return Result{Output: req.Instruction}, nil
+	})); err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+	m.SetCompletionHandler(func(status Status) {
+		completed <- status
+	})
+
+	task1, err := m.DispatchAsync(context.Background(), "worker", "one")
+	if err != nil {
+		t.Fatalf("dispatch async one: %v", err)
+	}
+	task2, err := m.DispatchAsync(context.Background(), "worker", "two")
+	if err != nil {
+		t.Fatalf("dispatch async two: %v", err)
+	}
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for first async task")
+	}
+
+	select {
+	case got := <-started:
+		t.Fatalf("second task %q started before slot released", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+
+	gotStatuses := map[string]Status{}
+	for len(gotStatuses) < 2 {
+		select {
+		case status := <-completed:
+			gotStatuses[status.TaskID] = status
+		case <-time.After(time.Second):
+			t.Fatal("timeout waiting for async completion")
+		}
+	}
+
+	if atomic.LoadInt32(&maxRunning) != 1 {
+		t.Fatalf("max running = %d, want 1", maxRunning)
+	}
+
+	for _, taskID := range []string{task1, task2} {
+		status, err := m.TaskStatus(taskID)
+		if err != nil {
+			t.Fatalf("TaskStatus(%q): %v", taskID, err)
+		}
+		if status.State != StatusSuccess {
+			t.Fatalf("TaskStatus(%q).State = %q, want %q", taskID, status.State, StatusSuccess)
+		}
+		if status.Output != "one" && status.Output != "two" {
+			t.Fatalf("TaskStatus(%q).Output = %q, want one/two", taskID, status.Output)
+		}
+	}
+
+	if _, err := m.TaskStatus("missing"); !errors.Is(err, ErrUnknownTask) {
+		t.Fatalf("TaskStatus(missing) err = %v, want ErrUnknownTask", err)
 	}
 }
