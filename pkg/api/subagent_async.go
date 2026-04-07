@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"strings"
 
 	hooks "github.com/stellarlinkco/agentsdk-go/pkg/hooks"
@@ -30,11 +31,13 @@ func (rt *Runtime) handleSubagentCompletion(status subagents.Status) {
 		Error:  strings.TrimSpace(status.Error),
 	}
 	if rt.hooks != nil {
-		_ = rt.hooks.Publish(hooks.Event{
+		if err := rt.hooks.Publish(hooks.Event{
 			Type:      hooks.SubagentComplete,
 			SessionID: strings.TrimSpace(status.SessionID),
 			Payload:   payload,
-		})
+		}); err != nil {
+			log.Printf("hooks: subagent completion publish failed: %v", err)
+		}
 	}
 	if rt.opts.DisableSubagentSummary || rt.histories == nil {
 		return

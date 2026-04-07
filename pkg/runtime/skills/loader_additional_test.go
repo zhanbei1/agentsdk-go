@@ -104,7 +104,10 @@ func TestLoadFromFSEmbedSkillsProjectWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute shared: %v", err)
 	}
-	sharedOut := shared.Output.(map[string]any)
+	sharedOut, ok := shared.Output.(map[string]any)
+	if !ok {
+		t.Fatalf("expected shared output map, got %T", shared.Output)
+	}
 	if sharedOut["body"] != "project body" {
 		t.Fatalf("expected project override, got %v", sharedOut["body"])
 	}
@@ -113,8 +116,15 @@ func TestLoadFromFSEmbedSkillsProjectWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute embed-only: %v", err)
 	}
-	embedOnlyOut := embedOnly.Output.(map[string]any)
-	if strings.TrimSpace(embedOnlyOut["body"].(string)) != "embed only" {
+	embedOnlyOut, ok := embedOnly.Output.(map[string]any)
+	if !ok {
+		t.Fatalf("expected embed-only output map, got %T", embedOnly.Output)
+	}
+	body, ok := embedOnlyOut["body"].(string)
+	if !ok {
+		t.Fatalf("expected embed-only body string, got %T", embedOnlyOut["body"])
+	}
+	if strings.TrimSpace(body) != "embed only" {
 		t.Fatalf("expected embed skill body, got %v", embedOnlyOut["body"])
 	}
 }
