@@ -2,9 +2,11 @@ package tool
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"log"
 	"net/http"
 	"os"
@@ -16,12 +18,250 @@ import (
 	"github.com/stellarlinkco/agentsdk-go/pkg/mcp"
 )
 
+type mcpCompressedDescriptor struct {
+	Description string
+	Schema      *JSONSchema
+}
+
+type mcpRefreshController struct {
+	timer       *time.Timer
+	inFlight    bool
+	failCount   int
+	nextAllowed time.Time
+}
+
+func (r *Registry) mcpDescriptorCacheGet(key string) (mcpCompressedDescriptor, bool) {
+	if r == nil || strings.TrimSpace(key) == "" {
+		return mcpCompressedDescriptor{}, false
+	}
+	r.mcpDescMu.Lock()
+	defer r.mcpDescMu.Unlock()
+	v, ok := r.mcpDescCache[key]
+	return v, ok
+}
+
+func (r *Registry) mcpDescriptorCachePut(key string, v mcpCompressedDescriptor) {
+	if r == nil || strings.TrimSpace(key) == "" {
+		return
+	}
+	r.mcpDescMu.Lock()
+	defer r.mcpDescMu.Unlock()
+	r.mcpDescCache[key] = v
+}
+
+func (r *Registry) mcpDescriptorCacheKey(serverName, remoteName, desc string, schema any, descMaxRunes int, pruned bool) string {
+	h := sha256.New()
+	writeHashString(h, serverName)
+	writeHashString(h, remoteName)
+	writeHashString(h, cropRunes(strings.TrimSpace(desc), descMaxRunes))
+	if pruned {
+		writeHashString(h, "prune_schema_desc:true")
+	} else {
+		writeHashString(h, "prune_schema_desc:false")
+	}
+	if schema != nil {
+		if b, err := json.Marshal(schema); err == nil {
+			_, _ = h.Write(b)
+		}
+	}
+	sum := h.Sum(nil)
+	// short key is fine; collisions are extremely unlikely for our use.
+	return fmt.Sprintf("mcpdesc:%x", sum[:12])
+}
+
+func writeHashString(h hash.Hash, s string) {
+	if h == nil {
+		return
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return
+	}
+	_, _ = h.Write([]byte(s))
+	_, _ = h.Write([]byte{0})
+}
+
+func cropRunes(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if s == "" || max <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return strings.TrimSpace(string(r[:max])) + "…"
+}
+
+func pruneJSONSchemaDescriptions(schema *JSONSchema) *JSONSchema {
+	if schema == nil {
+		return nil
+	}
+	clone := *schema
+	clone.Properties = pruneSchemaMap(clone.Properties)
+	// intentionally keep Required/Type/etc.
+	return &clone
+}
+
+func pruneSchemaMap(m map[string]any) map[string]any {
+	if len(m) == 0 {
+		return m
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = pruneSchemaAny(v)
+	}
+	// Remove known high-token fields at top-level.
+	delete(out, "description")
+	delete(out, "title")
+	delete(out, "examples")
+	return out
+}
+
+func pruneSchemaAny(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		return pruneSchemaMap(t)
+	case []any:
+		cp := make([]any, 0, len(t))
+		for _, it := range t {
+			cp = append(cp, pruneSchemaAny(it))
+		}
+		return cp
+	default:
+		return v
+	}
+}
+
+func (r *Registry) enqueueMCPRefresh(serverID, sessionID string) {
+	if r == nil {
+		return
+	}
+	serverID = strings.TrimSpace(serverID)
+	sessionID = strings.TrimSpace(sessionID)
+	if serverID == "" && sessionID == "" {
+		return
+	}
+
+	// Resolve debounce + timeout from tracked session options.
+	opts := MCPServerOptions{}
+	r.mu.RLock()
+	for _, info := range r.mcpSessions {
+		if info == nil {
+			continue
+		}
+		if sessionID != "" && info.sessionID == sessionID {
+			opts = cloneMCPServerOptions(info.opts)
+			break
+		}
+		if opts.Timeout == 0 && serverID != "" && info.serverID == serverID {
+			opts = cloneMCPServerOptions(info.opts)
+		}
+	}
+	r.mu.RUnlock()
+
+	debounce := opts.RefreshDebounce
+	if debounce <= 0 {
+		debounce = 300 * time.Millisecond
+	}
+	key := serverID
+	if sessionID != "" {
+		key = "sid:" + sessionID
+	} else {
+		key = "srv:" + serverID
+	}
+
+	r.mcpRefreshMu.Lock()
+	ctrl := r.mcpRefreshState[key]
+	if ctrl == nil {
+		ctrl = &mcpRefreshController{}
+		r.mcpRefreshState[key] = ctrl
+	}
+	if ctrl.timer == nil {
+		ctrl.timer = time.AfterFunc(debounce, func() {
+			r.runMCPRefresh(key, serverID, sessionID)
+		})
+	} else {
+		ctrl.timer.Reset(debounce)
+	}
+	r.mcpRefreshMu.Unlock()
+}
+
+func (r *Registry) runMCPRefresh(key, serverID, sessionID string) {
+	if r == nil {
+		return
+	}
+	r.mcpRefreshMu.Lock()
+	ctrl := r.mcpRefreshState[key]
+	if ctrl == nil {
+		ctrl = &mcpRefreshController{}
+		r.mcpRefreshState[key] = ctrl
+	}
+	now := time.Now()
+	if ctrl.inFlight {
+		r.mcpRefreshMu.Unlock()
+		return
+	}
+	if !ctrl.nextAllowed.IsZero() && now.Before(ctrl.nextAllowed) {
+		// reschedule at nextAllowed
+		delay := time.Until(ctrl.nextAllowed)
+		if delay < 0 {
+			delay = 0
+		}
+		if ctrl.timer == nil {
+			ctrl.timer = time.AfterFunc(delay, func() {
+				r.runMCPRefresh(key, serverID, sessionID)
+			})
+		} else {
+			ctrl.timer.Reset(delay)
+		}
+		r.mcpRefreshMu.Unlock()
+		return
+	}
+	ctrl.inFlight = true
+	r.mcpRefreshMu.Unlock()
+
+	go func() {
+		refreshCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		err := r.refreshMCPTools(refreshCtx, serverID, sessionID)
+
+		r.mcpRefreshMu.Lock()
+		defer r.mcpRefreshMu.Unlock()
+		ctrl := r.mcpRefreshState[key]
+		if ctrl == nil {
+			ctrl = &mcpRefreshController{}
+			r.mcpRefreshState[key] = ctrl
+		}
+		ctrl.inFlight = false
+		if err == nil {
+			ctrl.failCount = 0
+			ctrl.nextAllowed = time.Time{}
+			return
+		}
+		ctrl.failCount++
+		// Exponential backoff capped at 30s.
+		backoff := time.Duration(ctrl.failCount*ctrl.failCount) * 250 * time.Millisecond
+		if backoff > 30*time.Second {
+			backoff = 30 * time.Second
+		}
+		ctrl.nextAllowed = time.Now().Add(backoff)
+		log.Printf("tool registry: refresh MCP tools: %v (backoff=%s)", err, backoff)
+	}()
+}
+
 // Registry keeps the mapping between tool names and implementations.
 type Registry struct {
 	mu          sync.RWMutex
 	tools       map[string]Tool
 	mcpSessions []*mcpSessionInfo
 	validator   Validator
+
+	mcpDescMu    sync.Mutex
+	mcpDescCache map[string]mcpCompressedDescriptor
+
+	mcpRefreshMu    sync.Mutex
+	mcpRefreshState map[string]*mcpRefreshController
 }
 
 type mcpListChangedHandler = func(context.Context, *mcp.ClientSession)
@@ -39,6 +279,18 @@ type MCPServerOptions struct {
 	EnabledTools  []string
 	DisabledTools []string
 	ToolTimeout   time.Duration
+
+	// ToolDescriptionMaxRunes caps MCP tool description length exposed to the model.
+	// Default: 240.
+	ToolDescriptionMaxRunes int
+	// DisableSchemaDescriptionPrune disables removing nested "description"/"title"/"examples"
+	// fields from MCP tool schemas. Pruning reduces prompt size without affecting validation.
+	// Default: false (i.e. pruning is enabled).
+	DisableSchemaDescriptionPrune bool
+
+	// RefreshDebounce controls how long to debounce ToolListChanged before refresh.
+	// Default: 300ms.
+	RefreshDebounce time.Duration
 }
 
 var newMCPClientWithOptions = func(ctx context.Context, spec string, opts MCPServerOptions, handler mcpListChangedHandler) (*mcp.ClientSession, error) {
@@ -48,8 +300,10 @@ var newMCPClientWithOptions = func(ctx context.Context, spec string, opts MCPSer
 // NewRegistry creates a registry backed by the default validator.
 func NewRegistry() *Registry {
 	return &Registry{
-		tools:     make(map[string]Tool),
-		validator: DefaultValidator{},
+		tools:           make(map[string]Tool),
+		validator:       DefaultValidator{},
+		mcpDescCache:    make(map[string]mcpCompressedDescriptor),
+		mcpRefreshState: make(map[string]*mcpRefreshController),
 	}
 }
 
@@ -178,7 +432,7 @@ func (r *Registry) RegisterMCPServer(ctx context.Context, serverPath, serverName
 		return fmt.Errorf("MCP server returned no tools")
 	}
 
-	wrappers, names, err := buildRemoteToolWrappers(session, serverName, tools, MCPServerOptions{})
+	wrappers, names, err := r.buildRemoteToolWrappers(session, serverName, tools, MCPServerOptions{})
 	if err != nil {
 		return err
 	}
@@ -243,7 +497,7 @@ func (r *Registry) RegisterMCPServerWithOptions(ctx context.Context, serverPath,
 		return fmt.Errorf("MCP server returned no tools")
 	}
 
-	wrappers, names, err := buildRemoteToolWrappers(session, serverName, tools, opts)
+	wrappers, names, err := r.buildRemoteToolWrappers(session, serverName, tools, opts)
 	if err != nil {
 		return err
 	}
@@ -357,11 +611,16 @@ func (r *Registry) registerMCPSession(serverID, serverName string, session *mcp.
 	return nil
 }
 
-func buildRemoteToolWrappers(session *mcp.ClientSession, serverName string, tools []*mcp.Tool, opts MCPServerOptions) ([]Tool, []string, error) {
+func (r *Registry) buildRemoteToolWrappers(session *mcp.ClientSession, serverName string, tools []*mcp.Tool, opts MCPServerOptions) ([]Tool, []string, error) {
 	wrappers := make([]Tool, 0, len(tools))
 	names := make([]string, 0, len(tools))
 	seen := map[string]struct{}{}
 	filter := newMCPToolFilter(opts.EnabledTools, opts.DisabledTools)
+	descMax := opts.ToolDescriptionMaxRunes
+	if descMax <= 0 {
+		descMax = 240
+	}
+	pruneSchemaDesc := !opts.DisableSchemaDescriptionPrune
 	for _, desc := range tools {
 		if desc == nil || strings.TrimSpace(desc.Name) == "" {
 			return nil, nil, fmt.Errorf("encountered MCP tool with empty name")
@@ -377,14 +636,42 @@ func buildRemoteToolWrappers(session *mcp.ClientSession, serverName string, tool
 			return nil, nil, fmt.Errorf("tool %s already registered", toolName)
 		}
 		seen[toolName] = struct{}{}
+
+		cacheKey := ""
+		if r != nil {
+			cacheKey = r.mcpDescriptorCacheKey(serverName, desc.Name, desc.Description, desc.InputSchema, descMax, pruneSchemaDesc)
+			if cacheKey != "" {
+				if cached, ok := r.mcpDescriptorCacheGet(cacheKey); ok {
+					wrappers = append(wrappers, &remoteTool{
+						name:        toolName,
+						remoteName:  desc.Name,
+						description: cached.Description,
+						schema:      cached.Schema,
+						session:     session,
+						timeout:     opts.ToolTimeout,
+					})
+					names = append(names, toolName)
+					continue
+				}
+			}
+		}
+
 		schema, err := convertMCPSchema(desc.InputSchema)
 		if err != nil {
 			return nil, nil, fmt.Errorf("parse schema for %s: %w", desc.Name, err)
 		}
+		if pruneSchemaDesc {
+			schema = pruneJSONSchemaDescriptions(schema)
+		}
+		compressedDesc := cropRunes(strings.TrimSpace(desc.Description), descMax)
+
+		if cacheKey != "" && r != nil {
+			r.mcpDescriptorCachePut(cacheKey, mcpCompressedDescriptor{Description: compressedDesc, Schema: schema})
+		}
 		wrappers = append(wrappers, &remoteTool{
 			name:        toolName,
 			remoteName:  desc.Name,
-			description: desc.Description,
+			description: compressedDesc,
 			schema:      schema,
 			session:     session,
 			timeout:     opts.ToolTimeout,
@@ -407,13 +694,7 @@ func (r *Registry) mcpToolsChangedHandler(serverID string) mcpListChangedHandler
 		if session != nil {
 			sessionID = session.ID()
 		}
-		go func() {
-			refreshCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := r.refreshMCPTools(refreshCtx, serverID, sessionID); err != nil {
-				log.Printf("tool registry: refresh MCP tools: %v", err)
-			}
-		}()
+		r.enqueueMCPRefresh(serverID, sessionID)
 	}
 }
 
@@ -465,7 +746,7 @@ func (r *Registry) refreshMCPTools(ctx context.Context, serverID, sessionID stri
 		return fmt.Errorf("MCP server returned no tools")
 	}
 
-	wrappers, names, err := buildRemoteToolWrappers(session, serverName, tools, opts)
+	wrappers, names, err := r.buildRemoteToolWrappers(session, serverName, tools, opts)
 	if err != nil {
 		return err
 	}

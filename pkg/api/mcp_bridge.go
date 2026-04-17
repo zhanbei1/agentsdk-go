@@ -53,8 +53,15 @@ func collectMCPServers(settings *config.Settings, explicit []string) []mcpServer
 			// Convert MCPServerConfig to spec string
 			spec := ""
 			switch cfg.Type {
-			case "http", "sse":
+			case "http":
 				spec = cfg.URL
+			case "sse":
+				// Allow bare host/path URLs in settings (e.g. "localhost:3333/sse")
+				// by converting them into an explicit SSE spec.
+				spec = cfg.URL
+				if strings.TrimSpace(spec) != "" && !strings.Contains(spec, "://") {
+					spec = "sse://" + spec
+				}
 			case "stdio":
 				spec = fmt.Sprintf("stdio://%s %s", cfg.Command, strings.Join(cfg.Args, " "))
 			default:

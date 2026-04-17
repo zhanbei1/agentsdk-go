@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stellarlinkco/agentsdk-go/pkg/config"
@@ -289,6 +290,41 @@ func TestRuntimeToolExecutor_PropagatesOutputRef(t *testing.T) {
 	}
 }
 
+func TestRuntimeToolExecutor_TruncatesLargeToolOutputIntoFilePointer(t *testing.T) {
+	reg := tool.NewRegistry()
+	impl := &bigOutputTool{}
+	if err := reg.Register(impl); err != nil {
+		t.Fatalf("register tool: %v", err)
+	}
+	exec := tool.NewExecutor(reg, nil)
+	history := message.NewHistory()
+	rtExec := &runtimeToolExecutor{
+		executor:              exec,
+		hooks:                 &runtimeHookAdapter{},
+		history:               history,
+		host:                  "localhost",
+		sessionID:             "s-big",
+		outputInlineMaxRunes:  200,
+		outputSnippetMaxRunes: 120,
+	}
+	call := model.ToolCall{ID: "c1", Name: impl.Name(), Arguments: map[string]any{}}
+	_, err := rtExec.Execute(context.Background(), call)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	msgs := history.All()
+	if len(msgs) != 1 || len(msgs[0].ToolCalls) != 1 {
+		t.Fatalf("unexpected history: %+v", msgs)
+	}
+	got := msgs[0].ToolCalls[0].Result
+	if strings.Contains(got, strings.Repeat("x", 10000)) {
+		t.Fatalf("expected tool output to be truncated, got huge inline content")
+	}
+	if !strings.Contains(got, "[Output saved to:") {
+		t.Fatalf("expected output reference, got=%q", got)
+	}
+}
+
 func TestNewRejectsDisallowedMCPServer(t *testing.T) {
 	root := newClaudeProject(t)
 	mdl := &stubModel{responses: []*model.Response{{Message: model.Message{Role: "assistant", Content: "ok"}}}}
@@ -504,6 +540,15 @@ func (o *outputRefTool) Description() string      { return "returns tool output 
 func (o *outputRefTool) Schema() *tool.JSONSchema { return &tool.JSONSchema{Type: "object"} }
 func (o *outputRefTool) Execute(context.Context, map[string]interface{}) (*tool.ToolResult, error) {
 	return &tool.ToolResult{Success: true, Output: "ok", OutputRef: o.ref}, nil
+}
+
+type bigOutputTool struct{}
+
+func (bigOutputTool) Name() string             { return "big" }
+func (bigOutputTool) Description() string      { return "big output" }
+func (bigOutputTool) Schema() *tool.JSONSchema { return &tool.JSONSchema{Type: "object"} }
+func (bigOutputTool) Execute(context.Context, map[string]interface{}) (*tool.ToolResult, error) {
+	return &tool.ToolResult{Success: true, Output: strings.Repeat("x", 20000)}, nil
 }
 
 type failingTool struct {

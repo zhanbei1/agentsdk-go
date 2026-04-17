@@ -123,13 +123,15 @@ func (rt *Runtime) runAgentWithMiddleware(prep preparedRun, extras ...middleware
 	}
 
 	toolExec := &runtimeToolExecutor{
-		executor:  rt.executor,
-		hooks:     hookAdapter,
-		history:   prep.history,
-		allow:     prep.toolWhitelist,
-		root:      rt.sbRoot,
-		host:      "localhost",
-		sessionID: prep.normalized.SessionID,
+		executor:              rt.executor,
+		hooks:                 hookAdapter,
+		history:               prep.history,
+		allow:                 prep.toolWhitelist,
+		root:                  rt.sbRoot,
+		host:                  "localhost",
+		sessionID:             prep.normalized.SessionID,
+		outputInlineMaxRunes:  rt.opts.ToolOutputInlineMaxRunes,
+		outputSnippetMaxRunes: rt.opts.ToolOutputSnippetMaxRunes,
 	}
 	if rt.opts.Skylark != nil && rt.opts.Skylark.Enabled && prep.skylarkProgressive {
 		toolExec.skylark = newSkylarkAllowState(prep.toolWhitelist)
@@ -141,6 +143,9 @@ func (rt *Runtime) runAgentWithMiddleware(prep preparedRun, extras ...middleware
 	}
 	if len(extras) > 0 {
 		chainItems = append(chainItems, extras...)
+	}
+	if rt.opts.ReflectionEnabled == nil || (rt.opts.ReflectionEnabled != nil && *rt.opts.ReflectionEnabled) {
+		chainItems = append(chainItems, middleware.NewReflectionMiddleware())
 	}
 	chain := middleware.NewChain(chainItems, middleware.WithTimeout(rt.opts.MiddlewareTimeout))
 
@@ -167,10 +172,20 @@ func (rt *Runtime) runLoop(prep preparedRun, mdl model.Model, hookAdapter *runti
 		ctx = context.Background()
 	}
 
+	historyBefore := prep.history.All()
+
 	if strings.TrimSpace(prep.prompt) != "" || len(prep.contentBlocks) > 0 {
 		userMsg := message.Message{Role: "user", Content: strings.TrimSpace(prep.prompt)}
 		if len(prep.contentBlocks) > 0 {
 			userMsg.ContentBlocks = convertAPIContentBlocks(prep.contentBlocks)
+		}
+
+		// In progressive Skylark mode, auto-inject a small amount of relevant history
+		// for follow-up prompts so the model doesn't need to remember to call retrieval.
+		if rt.opts.Skylark != nil && rt.opts.Skylark.Enabled && prep.skylarkProgressive {
+			if injection := buildSkylarkHistoryPrefetchInjection(userMsg.Content, historyBefore, rt.opts.Skylark); strings.TrimSpace(injection) != "" {
+				userMsg.Content = strings.TrimSpace(combinePrompt(userMsg.Content, injection))
+			}
 		}
 		prep.history.Append(userMsg)
 	}
@@ -203,6 +218,9 @@ func (rt *Runtime) runLoop(prep preparedRun, mdl model.Model, hookAdapter *runti
 	systemPrompt := rt.opts.SystemPrompt
 	if rt.opts.Skylark != nil && rt.opts.Skylark.Enabled && !prep.skylarkProgressive {
 		systemPrompt = augmentSkylarkOneShotSystemPrompt(systemPrompt, rt.skylarkAgentsMD, rt.skylarkRulesMD)
+	}
+	if rt.opts.Skylark != nil && rt.opts.Skylark.Enabled && prep.skylarkProgressive {
+		systemPrompt = augmentSkylarkProgressiveSystemPrompt(systemPrompt, historyBefore, rt.opts.Skylark)
 	}
 
 	trimmer := rt.newTrimmer()

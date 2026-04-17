@@ -160,7 +160,17 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		}
 	}
 
-	executor := tool.NewExecutor(registry, sbox).WithOutputPersister(tool.NewOutputPersister())
+	persister := tool.NewOutputPersister()
+	// Align executor-level persistence with API-level knobs so all call paths share
+	// the same behaviour.
+	if opts.ToolOutputInlineMaxRunes > 0 {
+		persister.DefaultThresholdRunes = opts.ToolOutputInlineMaxRunes
+		persister.DefaultThresholdBytes = 0
+	}
+	if opts.ToolOutputSnippetMaxRunes > 0 {
+		persister.SnippetMaxRunes = opts.ToolOutputSnippetMaxRunes
+	}
+	executor := tool.NewExecutor(registry, sbox).WithOutputPersister(persister)
 
 	hooks := newHookExecutor(opts, settings)
 	compactor := newCompactor(opts.AutoCompact, opts.TokenLimit)
@@ -228,8 +238,10 @@ func (rt *Runtime) Run(ctx context.Context, req Request) (*Response, error) {
 	}
 	result, err := rt.runAgent(prep)
 	if err != nil {
+		_ = maybePersistProjectMemory(ctx, rt.opts, req.SessionID, prep.normalized.RequestID, prep.history.All(), "run_error", err)
 		return nil, err
 	}
+	_ = maybePersistProjectMemory(ctx, rt.opts, req.SessionID, prep.normalized.RequestID, prep.history.All(), "run_success", nil)
 	return rt.buildResponse(prep, result), nil
 }
 
@@ -291,6 +303,8 @@ func (rt *Runtime) RunStream(ctx context.Context, req Request) (<-chan StreamEve
 		var runErr error
 		var result runResult
 		defer func() {
+			// Best-effort: persist project memory conclusion on successful runs when enabled.
+			_ = maybePersistProjectMemory(ctxWithEmit, rt.opts, req.SessionID, prep.normalized.RequestID, prep.history.All(), "session_end", runErr)
 			if rt.hooks != nil {
 				reason := "completed"
 				if runErr != nil {

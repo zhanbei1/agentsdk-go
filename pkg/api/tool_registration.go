@@ -124,6 +124,12 @@ func builtinToolFactories(root string, sandboxDisabled bool, entry EntryPoint, s
 		}
 		return toolbuiltin.NewEditToolWithRoot(root)
 	}
+	rollbackCtor := func() tool.Tool {
+		if sandboxDisabled {
+			return toolbuiltin.NewRollbackLastStepToolWithSandbox(root, nil)
+		}
+		return toolbuiltin.NewRollbackLastStepToolWithRoot(root)
+	}
 
 	respectGitignore := true
 	if settings != nil && settings.RespectGitignore != nil {
@@ -153,6 +159,7 @@ func builtinToolFactories(root string, sandboxDisabled bool, entry EntryPoint, s
 	factories["read"] = readCtor
 	factories["write"] = writeCtor
 	factories["edit"] = editCtor
+	factories["rollback_last_step"] = rollbackCtor
 	factories["grep"] = grepCtor
 	factories["glob"] = globCtor
 	factories["skill"] = func() tool.Tool { return toolbuiltin.NewSkillTool(skReg, nil) }
@@ -162,7 +169,7 @@ func builtinToolFactories(root string, sandboxDisabled bool, entry EntryPoint, s
 
 func builtinOrder(entry EntryPoint) []string {
 	_ = entry
-	return []string{"bash", "read", "write", "edit", "glob", "grep", "skill"}
+	return []string{"bash", "read", "write", "edit", "rollback_last_step", "glob", "grep", "skill"}
 }
 
 func filterBuiltinNames(enabled []string, order []string) []string {

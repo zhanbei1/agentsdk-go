@@ -353,7 +353,18 @@ func normalizeHTTPURL(raw string, allowSchemeGuess bool) (string, error) {
 		return "", fmt.Errorf("endpoint is empty")
 	}
 	if allowSchemeGuess && !strings.Contains(raw, "://") {
-		raw = "https://" + raw
+		// Prefer http:// for local targets; otherwise default to https://.
+		// This mainly impacts specs like "sse://localhost:3333/sse".
+		lower := strings.ToLower(raw)
+		if strings.HasPrefix(lower, "localhost") ||
+			strings.HasPrefix(lower, "127.") ||
+			strings.HasPrefix(lower, "[::1]") ||
+			strings.HasPrefix(lower, "::1") ||
+			strings.HasPrefix(lower, "0.0.0.0") {
+			raw = "http://" + raw
+		} else {
+			raw = "https://" + raw
+		}
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil {

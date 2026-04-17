@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"errors"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -58,6 +59,11 @@ func (e *Executor) Execute(ctx context.Context, call Call) (*CallResult, error) 
 	tool, err := e.registry.Get(call.Name)
 	if err != nil {
 		return nil, err
+	}
+
+	// Best-effort journaling for rollback (write/edit).
+	if err := e.maybeJournal(call); err != nil {
+		log.Printf("tool journal warning: %v", err)
 	}
 
 	params := call.cloneParams()

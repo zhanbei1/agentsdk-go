@@ -39,6 +39,30 @@ type SkylarkOptions struct {
 	DefaultCapabilitiesLimit int
 	// DefaultUnlockTopN when unlock=true and unlock_top_n omitted (default 2).
 	DefaultUnlockTopN int
+
+	// ProgressiveMiniMemoryMaxRunes controls the max size of always-on "mini memory"
+	// appended to the system prompt in progressive Skylark mode. This mitigates
+	// "forgot last answer" failure modes when the model doesn't call retrieve_knowledge.
+	// Default: 400.
+	ProgressiveMiniMemoryMaxRunes int
+
+	// HistoryPrefetchMaxHits controls how many conversation hits to inject when
+	// a "follow-up" prompt is detected in progressive Skylark mode. Default: 4.
+	HistoryPrefetchMaxHits int
+
+	// HistoryPrefetchMaxRunes caps the injected prefetch snippet size. Default: 900.
+	HistoryPrefetchMaxRunes int
+
+	// HistoryPrefetchHints triggers prefetch when prompt contains any hint.
+	// If empty, sensible bilingual defaults are used.
+	HistoryPrefetchHints []string
+
+	// PersistProjectMemory enables writing short session conclusions into
+	// <ProjectRoot>/.agents/memory/*.jsonl for cross-session recall. Default: false.
+	PersistProjectMemory bool
+	// ProjectMemoryDir overrides the directory used to store memory JSONL files.
+	// Default: <ProjectRoot>/.agents/memory
+	ProjectMemoryDir string
 }
 
 func buildSkylarkEngine(ctx context.Context, opts Options, settings *config.Settings, memory, rules string, registry *tool.Registry) (*skylark.Engine, error) {
@@ -64,7 +88,12 @@ func buildSkylarkEngine(ctx context.Context, opts Options, settings *config.Sett
 	if err != nil {
 		return nil, err
 	}
-	docs := buildSkylarkDocuments(memory, rules, opts.skReg, registry.List())
+	memDocs, err := loadProjectMemoryDocuments(strings.TrimSpace(opts.Skylark.ProjectMemoryDir), 200)
+	if err != nil {
+		_ = eng.Close()
+		return nil, fmt.Errorf("skylark: load project memory: %w", err)
+	}
+	docs := buildSkylarkDocuments(memory, rules, opts.skReg, registry.List(), memDocs)
 	if err := eng.Rebuild(ctx, docs); err != nil {
 		_ = eng.Close()
 		return nil, err

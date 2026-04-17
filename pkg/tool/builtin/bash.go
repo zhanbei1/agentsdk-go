@@ -194,6 +194,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	output, outputFile, spoolErr := spool.Finalize()
 
 	data := map[string]interface{}{
+		"command":     command,
 		"workdir":     workdir,
 		"duration_ms": duration.Milliseconds(),
 		"timeout_ms":  timeout.Milliseconds(),
@@ -767,7 +768,7 @@ func newBashCommandValidator() *bashCommandValidator {
 	return &bashCommandValidator{
 		maxCommandBytes: 32768,
 		maxArgs:         512,
-		allowShellMeta:  true,
+		allowShellMeta:  false,
 	}
 }
 
@@ -809,25 +810,25 @@ func (v *bashCommandValidator) Validate(input string) error {
 
 	v.mu.RLock()
 	maxBytes := v.maxCommandBytes
-	//maxArgs := v.maxArgs
-	//allowMeta := v.allowShellMeta
+	maxArgs := v.maxArgs
+	allowMeta := v.allowShellMeta
 	v.mu.RUnlock()
 
 	if maxBytes > 0 && len(cmd) > maxBytes {
 		return fmt.Errorf("bash: command too long (%d bytes)", len(cmd))
 	}
 
-	//if strings.ContainsAny(cmd, "\n\r") {
-	//	return errors.New("bash: multiline command is not allowed")
-	//}
+	if strings.ContainsAny(cmd, "\n\r") {
+		return errors.New("bash: multiline command is not allowed")
+	}
 
 	if containsControlNonWhitespace(cmd) {
 		return errors.New("bash: control characters detected")
 	}
 
-	//if !allowMeta && strings.ContainsAny(cmd, "|;&><`$") {
-	//	return errors.New("bash: pipe or shell metacharacters are blocked")
-	//}
+	if !allowMeta && strings.ContainsAny(cmd, "|;&><`$") {
+		return errors.New("bash: pipe or shell metacharacters are blocked")
+	}
 
 	args, err := splitCommand(cmd)
 	if err != nil {
@@ -836,9 +837,9 @@ func (v *bashCommandValidator) Validate(input string) error {
 	if len(args) == 0 {
 		return errors.New("bash: empty command")
 	}
-	//if maxArgs > 0 && len(args) > maxArgs {
-	//	return fmt.Errorf("bash: too many arguments (%d)", len(args))
-	//}
+	if maxArgs > 0 && len(args) > maxArgs {
+		return fmt.Errorf("bash: too many arguments (%d)", len(args))
+	}
 
 	return nil
 }

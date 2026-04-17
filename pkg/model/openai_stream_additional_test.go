@@ -59,6 +59,7 @@ func (s stubCompletions) NewStreaming(ctx context.Context, params openai.ChatCom
 }
 
 func TestNewOpenAI_RequiresAPIKey(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
 	_, err := NewOpenAI(OpenAIConfig{})
 	if err == nil {
 		t.Fatalf("expected error")

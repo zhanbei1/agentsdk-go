@@ -9,7 +9,7 @@ import (
 	"github.com/stellarlinkco/agentsdk-go/pkg/tool"
 )
 
-func buildSkylarkDocuments(memory string, rules string, skReg *skills.Registry, tools []tool.Tool) []skylark.Document {
+func buildSkylarkDocuments(memory string, rules string, skReg *skills.Registry, tools []tool.Tool, extra ...[]skylark.Document) []skylark.Document {
 	var docs []skylark.Document
 	if strings.TrimSpace(memory) != "" {
 		docs = append(docs, skylark.Document{
@@ -95,6 +95,12 @@ func buildSkylarkDocuments(memory string, rules string, skReg *skills.Registry, 
 			Text:  text,
 			Meta:  meta,
 		})
+	}
+	for _, set := range extra {
+		if len(set) == 0 {
+			continue
+		}
+		docs = append(docs, set...)
 	}
 	return docs
 }

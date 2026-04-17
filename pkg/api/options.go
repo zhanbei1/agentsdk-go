@@ -148,11 +148,22 @@ type Options struct {
 	// DisableParallelToolCalls forces sequential tool execution within a single model turn.
 	// When false (default), independent tool calls run concurrently after BeforeTool hooks.
 	DisableParallelToolCalls bool
-	fsLayer                  *config.FS
-	settingsSnapshot         *config.Settings
-	skReg                    *skills.Registry
-	subMgr                   *subagents.Manager
-	tracer                   Tracer
+
+	// ReflectionEnabled enables the built-in structured reflection middleware.
+	// When nil, it defaults to enabled.
+	ReflectionEnabled *bool
+
+	// ToolOutputInlineMaxRunes controls when tool output is replaced by a persisted
+	// file pointer + snippet in history. Default: 4000.
+	ToolOutputInlineMaxRunes int
+	// ToolOutputSnippetMaxRunes controls the snippet size kept in history when output
+	// is persisted. Default: 900.
+	ToolOutputSnippetMaxRunes int
+	fsLayer                   *config.FS
+	settingsSnapshot          *config.Settings
+	skReg                     *skills.Registry
+	subMgr                    *subagents.Manager
+	tracer                    Tracer
 }
 
 // SessionHistoryLoader loads messages for a session from application storage.
@@ -271,8 +282,39 @@ func (o Options) withDefaults() Options {
 		o.MaxSessions = defaultMaxSessions
 	}
 
-	if o.Skylark != nil && o.Skylark.SimplePromptMaxRunes <= 0 {
-		o.Skylark.SimplePromptMaxRunes = 10
+	if o.ReflectionEnabled == nil {
+		v := true
+		o.ReflectionEnabled = &v
+	}
+	if o.ToolOutputInlineMaxRunes <= 0 {
+		o.ToolOutputInlineMaxRunes = 4000
+	}
+	if o.ToolOutputSnippetMaxRunes <= 0 {
+		o.ToolOutputSnippetMaxRunes = 900
+	}
+
+	if o.Skylark != nil {
+		if o.Skylark.SimplePromptMaxRunes <= 0 {
+			o.Skylark.SimplePromptMaxRunes = 10
+		}
+		if o.Skylark.ProgressiveMiniMemoryMaxRunes <= 0 {
+			o.Skylark.ProgressiveMiniMemoryMaxRunes = 400
+		}
+		if o.Skylark.HistoryPrefetchMaxHits <= 0 {
+			o.Skylark.HistoryPrefetchMaxHits = 4
+		}
+		if o.Skylark.HistoryPrefetchMaxRunes <= 0 {
+			o.Skylark.HistoryPrefetchMaxRunes = 900
+		}
+		if len(o.Skylark.HistoryPrefetchHints) == 0 {
+			o.Skylark.HistoryPrefetchHints = []string{
+				"上次", "之前", "刚才", "继续", "再问", "你刚说", "你说过",
+				"previous", "earlier", "last time", "again", "as before", "continue",
+			}
+		}
+		if strings.TrimSpace(o.Skylark.ProjectMemoryDir) == "" {
+			o.Skylark.ProjectMemoryDir = filepath.Join(o.ProjectRoot, ".agents", "memory")
+		}
 	}
 	return o
 }

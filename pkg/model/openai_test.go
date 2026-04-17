@@ -39,6 +39,7 @@ func (m *mockOpenAIChatCompletions) NewStreaming(ctx context.Context, params ope
 }
 
 func TestNewOpenAI(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
 	tests := []struct {
 		name    string
 		cfg     OpenAIConfig
