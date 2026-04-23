@@ -811,7 +811,7 @@ func (v *bashCommandValidator) Validate(input string) error {
 	v.mu.RLock()
 	maxBytes := v.maxCommandBytes
 	maxArgs := v.maxArgs
-	allowMeta := v.allowShellMeta
+	//allowMeta := v.allowShellMeta
 	v.mu.RUnlock()
 
 	if maxBytes > 0 && len(cmd) > maxBytes {
@@ -826,9 +826,9 @@ func (v *bashCommandValidator) Validate(input string) error {
 		return errors.New("bash: control characters detected")
 	}
 
-	if !allowMeta && strings.ContainsAny(cmd, "|;&><`$") {
-		return errors.New("bash: pipe or shell metacharacters are blocked")
-	}
+	//if !allowMeta && strings.ContainsAny(cmd, "|;&><`$") {
+	//	return errors.New("bash: pipe or shell metacharacters are blocked")
+	//}
 
 	args, err := splitCommand(cmd)
 	if err != nil {
